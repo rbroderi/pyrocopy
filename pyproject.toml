@@ -2,6 +2,9 @@
 requires = ["uv-build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = "pyrocopy"
+
 [project]
 name = "pyrocopy314"
 version = "0.8.0"
