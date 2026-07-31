@@ -1,10 +1,14 @@
-import argparse
-import logging
+from beartype.claw import beartype_package
 
-from . import pyrocopy
+beartype_package("pyrocopy")
+
+import argparse  # noqa: E402
+import logging  # noqa: E402
+
+from . import pyrocopy  # noqa: E402
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description='A robust file copying utility.')
 
     copymode_group = parser.add_argument_group('copy mode')
@@ -42,20 +46,24 @@ def main():
 
     # Default log level is INFO. Change the level up/down depending on the option chosen.
     pyrocopy.logger.setLevel(logging.INFO)
-    if (args.quiet > 0):
+    if args.quiet > 0:
         pyrocopy.logger.setLevel(logging.INFO + (args.quiet * 10))
-    elif (args.verbose > 0):
+    elif args.verbose > 0:
         pyrocopy.logger.setLevel(logging.INFO - (args.verbose * 10))
 
     # Perform the desired operation
     results = None
-    if (args.mirror):
+    if args.mirror:
         results = pyrocopy.mirror(args.source, args.destination, includeFiles=args.includefiles, includeDirs=args.includedirs, excludeFiles=args.excludefiles, excludeDirs=args.excludedirs, level=args.level, followLinks=args.followlinks, forceOverwrite=args.force, preserveStats=(not args.nostat))
-    elif (args.move):
+    elif args.move:
         results = pyrocopy.move(args.source, args.destination, includeFiles=args.includefiles, includeDirs=args.includedirs, excludeFiles=args.excludefiles, excludeDirs=args.excludedirs, level=args.level, followLinks=args.followlinks, forceOverwrite=args.force, preserveStats=(not args.nostat))
-    elif (args.sync):
+    elif args.sync:
         results = pyrocopy.sync(args.source, args.destination, includeFiles=args.includefiles, includeDirs=args.includedirs, excludeFiles=args.excludefiles, excludeDirs=args.excludedirs, level=args.level, followLinks=args.followlinks, forceOverwrite=args.force, preserveStats=(not args.nostat))
     else:
         results = pyrocopy.copy(args.source, args.destination, includeFiles=args.includefiles, includeDirs=args.includedirs, excludeFiles=args.excludefiles, excludeDirs=args.excludedirs, level=args.level, followLinks=args.followlinks, forceOverwrite=args.force, preserveStats=(not args.nostat))
 
     pyrocopy._displayCopyResults(results)
+
+
+if __name__ == "__main__":
+    main()

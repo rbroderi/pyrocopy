@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-'''
-Robust file utilities for Python inspired by Windows' robocopy.
+"""Robust file utilities for Python inspired by Windows' robocopy.
 
 Homepage: https://github.com/caskater4/pyrocopy
 
@@ -23,7 +22,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-'''
+"""
+from __future__ import annotations
 
 import errno
 import fnmatch
@@ -32,1159 +32,863 @@ import os
 import re
 import stat
 import sys
+from typing import TypedDict, cast
 
-'''
-The version of this script as an int tuple (major, minor, patch).
-'''
-__version__ = (0, 8, 0)
+__version__: tuple[int, int, int] = (0, 8, 0)
+__version_str__: str = ".".join(str(v) for v in __version__)
 
-'''
-The version of this script as a string. (e.g. '1.0.0')
-'''
-__version_str__ = '.'.join([str(__version__[0]), str(__version__[1]), str(__version__[2])])
-
-'''
-The logger used to report information and progress during operations.
-
-The default log level is INFO.
-'''
-logger = logging.getLogger(__name__)
+#: Logger used to report information and progress during operations.
+logger: logging.Logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-BUFFERSIZE_KIB = 16  # Buffer size in kiB for file-copy operations.
+BUFFERSIZE_KIB: int = 16  # Buffer size in kiB for file-copy operations.
+_PROGRESS_BAR_WIDTH: int = 80
 
-'''
-Copies all files and folders from the given source directory to the destination.
-
-:type src:string
-:param src: The source path to copy from
-
-:type dst:string
-:param dst: The destination path to copy to
-
-:type includeFiles:array
-:param includeFiles: A list of regex and wildcard patterns of files to include during the operation.
-                     Files not matching at least one pattern in the include list will be skipped.
-                     Regex patterns must be prefixed with re:
-
-:type includeDirs:array
-:param includeDirs: A list of regex and wildcard patterns of directory names to include during the operation.
-                    Directories not matching at least one pattern in the include list will be skipped.
-                    Regex patterns must be prefixed with re:
-
-:type excludeFiles:array
-:param excludeFiles: A list of regex and wildcard patterns of files to exclude during the operation.
-                     Regex patterns must be prefixed with re:
-
-:type excludeDirs:array
-:param excludeDirs: A list of regex and wildcard patterns of directory names to exclude during the operation.
-                    Regex patterns must be prefixed with re:
-
-:type level:int
-:param level: The maximum depth to traverse in the source directory tree.
-               A value of 0 traverses the entire tree.
-               A positive value traverses N levels from the top with value 1 being the source root.
-               A negative value traverses N levels from the bottom of the source tree.
-
-:type followLinks:bool
-:param followLinks: Set to true to traverse through symbolic links.
-
-:type forceOverwrite:bool
-:param forceOverwrite: Set to true to overwrite destination files even if they are newer.
-
-:type preserveStats:bool
-:param preserveStats: Set to True to copy the source file stats to the destination.
-
-:type detailedResults:bool
-:param detailedResults: Set to True to include additional details in the results containing a list of all files and
-                        directories that were skipped or failed during the operation.
-
-:rtype:dict
-:return: Returns a dictionary containing the following stats:
-         'filesCopied':int, 'filesFailed':int, 'filesSkipped':int, 'dirsCopied':int, 'dirsFailed':int, 'dirsSkipped':int
-         If detailedResults is set to True also includes the following:
-         'filesCopiedList':list, 'filesFailedList':list, 'filesSkippedList':list,
-         'dirsCopiedList':list, 'dirsFailedList':list, 'dirsSkippedList':list
-'''
+_Pattern = str | re.Pattern[str]
 
 
-def copy(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, excludeDirs=None, level=0,
-         followLinks=False, forceOverwrite=False, preserveStats=True, detailedResults=False):
-    # Always work with absolute paths
+# ---------------------------------------------------------------------------
+# Result TypedDicts
+# ---------------------------------------------------------------------------
+
+
+class _CopyCounters(TypedDict):
+    filesCopied: int
+    filesFailed: int
+    filesSkipped: int
+    dirsCopied: int
+    dirsFailed: int
+    dirsSkipped: int
+
+
+class _CopyLists(TypedDict, total=False):
+    filesCopiedList: list[str]
+    filesFailedList: list[str]
+    filesSkippedList: list[str]
+    dirsCopiedList: list[str]
+    dirsFailedList: list[str]
+    dirsSkippedList: list[str]
+
+
+class CopyResults(_CopyCounters, _CopyLists):
+    """Results returned by :func:`copy` and :func:`sync`."""
+
+
+class _MirrorRequiredExtras(TypedDict):
+    filesRemoved: int
+    dirsRemoved: int
+
+
+class _MirrorOptionalExtras(TypedDict, total=False):
+    filesRemovedList: list[str]
+    dirsRemovedList: list[str]
+
+
+class MirrorResults(CopyResults, _MirrorRequiredExtras, _MirrorOptionalExtras):
+    """Results returned by :func:`mirror`."""
+
+
+class _MoveCounters(TypedDict):
+    filesMoved: int
+    filesFailed: int
+    filesSkipped: int
+    dirsMoved: int
+    dirsFailed: int
+    dirsSkipped: int
+
+
+class _MoveLists(TypedDict, total=False):
+    filesMovedList: list[str]
+    filesFailedList: list[str]
+    filesSkippedList: list[str]
+    dirsMovedList: list[str]
+    dirsFailedList: list[str]
+    dirsSkippedList: list[str]
+
+
+class MoveResults(_MoveCounters, _MoveLists):
+    """Results returned by :func:`move`."""
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _compile_patterns(patterns: list[str] | None) -> list[_Pattern]:
+    """Compile pattern strings into fnmatch strings or compiled regex objects.
+
+    Args:
+        patterns: Raw pattern strings; prefix with ``re:`` for regex.
+
+    Returns:
+        A list of plain fnmatch strings and compiled :class:`re.Pattern` objects.
+    """
+    if not patterns:
+        return []
+    compiled: list[_Pattern] = []
+    for pattern in patterns:
+        if pattern.startswith("re:"):
+            compiled.append(re.compile(pattern[3:]))
+        else:
+            compiled.append(pattern)
+    return compiled
+
+
+def _init_copy_results(detailed: bool) -> CopyResults:
+    """Return a zero-initialized :class:`CopyResults`, adding list fields when *detailed* is True."""
+    results: CopyResults = {
+        "filesCopied": 0,
+        "filesFailed": 0,
+        "filesSkipped": 0,
+        "dirsCopied": 0,
+        "dirsFailed": 0,
+        "dirsSkipped": 0,
+    }
+    if detailed:
+        results["filesCopiedList"] = []
+        results["filesFailedList"] = []
+        results["filesSkippedList"] = []
+        results["dirsCopiedList"] = []
+        results["dirsFailedList"] = []
+        results["dirsSkippedList"] = []
+    return results
+
+
+def _record_file_result(
+    results: CopyResults,
+    result: int,
+    src_path: str,
+    dst_path: str,
+    detailed: bool,
+) -> None:
+    """Update *results* in-place from the outcome code of a file copy.
+
+    Args:
+        results: Mutable results dict to update.
+        result: 1 = copied, 0 = skipped, negative = error.
+        src_path: Source path used for logging and list tracking.
+        dst_path: Destination path used for logging.
+        detailed: Whether list fields are present and should be appended to.
+    """
+    if result == 1:
+        logger.info("Copied: %s => %s", src_path, dst_path)
+        results["filesCopied"] += 1
+        if detailed:
+            results["filesCopiedList"].append(src_path)  # type: ignore[union-attr]
+    elif result == 0:
+        logger.info("Skipped: %s", src_path)
+        results["filesSkipped"] += 1
+        if detailed:
+            results["filesSkippedList"].append(src_path)  # type: ignore[union-attr]
+    else:
+        logger.error("Failed: %s => %s", src_path, dst_path)
+        results["filesFailed"] += 1
+        if detailed:
+            results["filesFailedList"].append(src_path)  # type: ignore[union-attr]
+
+
+def _merge_unique(base: list[str], additions: list[str]) -> list[str]:
+    """Return *base* extended with items from *additions* not already present in *base*."""
+    seen = set(base)
+    return base + [x for x in additions if x not in seen]
+
+def copy(
+    src: str,
+    dst: str,
+    includeFiles: list[str] | None = None,
+    includeDirs: list[str] | None = None,
+    excludeFiles: list[str] | None = None,
+    excludeDirs: list[str] | None = None,
+    level: int = 0,
+    followLinks: bool = False,
+    forceOverwrite: bool = False,
+    preserveStats: bool = True,
+    detailedResults: bool = False,
+) -> CopyResults:
+    """Copy all files and folders from *src* to *dst*.
+
+    Args:
+        src: The source path to copy from.
+        dst: The destination path to copy to.
+        includeFiles: Patterns for files to include; prefix regex with ``re:``.
+        includeDirs: Patterns for directories to include; prefix regex with ``re:``.
+        excludeFiles: Patterns for files to exclude; prefix regex with ``re:``.
+        excludeDirs: Patterns for directories to exclude; prefix regex with ``re:``.
+        level: Max depth (0 = all; positive = from top; negative = from bottom).
+        followLinks: Traverse symbolic links as directories.
+        forceOverwrite: Overwrite destination files even if they are newer.
+        preserveStats: Copy mode, atime, mtime, and flags to the destination.
+        detailedResults: Populate per-item list fields in the returned dict.
+
+    Returns:
+        A :class:`CopyResults` dict with copy statistics.
+    """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
 
-    # Stats
-    results = {}
-    results['filesCopied'] = 0
-    results['filesFailed'] = 0
-    results['filesSkipped'] = 0
-    results['dirsCopied'] = 0
-    results['dirsFailed'] = 0
-    results['dirsSkipped'] = 0
-    if (detailedResults):
-        results['filesCopiedList'] = []
-        results['filesFailedList'] = []
-        results['filesSkippedList'] = []
-        results['dirsCopiedList'] = []
-        results['dirsFailedList'] = []
-        results['dirsSkippedList'] = []
+    results = _init_copy_results(detailedResults)
+    include_file_patterns = _compile_patterns(includeFiles)
+    include_dir_patterns = _compile_patterns(includeDirs)
+    exclude_file_patterns = _compile_patterns(excludeFiles)
+    exclude_dir_patterns = _compile_patterns(excludeDirs)
 
-    # Compile the provided regex patterns
-    includeFilePatterns = []
-    if (includeFiles is not None):
-        for pattern in includeFiles:
-            if (pattern.startswith("re:")):
-                includeFilePatterns.append(re.compile(pattern[3:]))
-            else:
-                includeFilePatterns.append(pattern)
-    includeDirPatterns = []
-    if (includeDirs is not None):
-        for pattern in includeDirs:
-            if (pattern.startswith("re:")):
-                includeDirPatterns.append(re.compile(pattern[3:]))
-            else:
-                includeDirPatterns.append(pattern)
-    excludeFilePatterns = []
-    if (excludeFiles is not None):
-        for pattern in excludeFiles:
-            if (pattern.startswith("re:")):
-                excludeFilePatterns.append(re.compile(pattern[3:]))
-            else:
-                excludeFilePatterns.append(pattern)
-    excludeDirPatterns = []
-    if (excludeDirs is not None):
-        for pattern in excludeDirs:
-            if (pattern.startswith("re:")):
-                excludeDirPatterns.append(re.compile(pattern[3:]))
-            else:
-                excludeDirPatterns.append(pattern)
-
-    if (not _isSamePath(src, dst)):
-        # Is the source path a file, directory or symlink?
-        if (os.path.isfile(src) or (not followLinks and os.path.islink(src))):
-            # Is the destination path a file name or directory?
-            if (os.path.isdir(dst)):
-                dst = os.path.join(dst, os.path.basename(src))
-
-            # Copy the file
-            result = _copyFile(src, dst, includeFilePatterns, excludeFilePatterns, forceOverwrite=forceOverwrite)
-            if (result == 1):
-                logger.info("Copied: %s => %s", src, dst)
-                results['filesCopied'] += 1
-                if (detailedResults):
-                    results['filesCopiedList'].append(src)
-            elif (result == 0):
-                logger.info("Skipped: %s", src)
-                results['filesSkipped'] += 1
-                if (detailedResults):
-                    results['filesSkippedList'].append(src)
-            else:
-                logger.error("Failed: %s => %s", src, dst)
-                results['filesFailed'] += 1
-                if (detailedResults):
-                    results['filesFailedList'].append(src)
-        elif (os.path.isdir(src)):
-            # Make sure the destination exists to copy files to
-            if (not os.path.isdir(dst)):
-                mkdir(dst)
-
-            # Determine the max depth.
-            maxDepth = _getTreeDepth(src)
-
-            # Traverse the tree and begin copying. Always traverse from the bottom up as this ensures we get the
-            # desired behavior for file/dir inclusion patterns.
-            for root, dirs, files in os.walk(src, topdown=False, followlinks=followLinks):
-                relRoot = os.path.relpath(root, src)
-
-                logger.debug("Processing Directory: %s", relRoot)
-
-                # Is the root a symlink? Should we follow?
-                if (os.path.islink(root) and not followLinks):
-                    logger.info("Skipped: %s", relRoot)
-                    results['dirsSkipped'] += 1
-                    if (detailedResults):
-                        results['dirsSkippedList'].append(relRoot)
-                    continue
-
-                # Exclude items not at the desired depth
-                if (level != 0):
-                    # Determine the current depth of relRoot
-                    depth = 0
-                    if (relRoot != '.'):
-                        depth = relRoot.count(os.path.sep) + 1
-
-                    # If traversing in reverse we need to subtract the max depth to get the relative level
-                    if (level < 0):
-                        depth = maxDepth - depth
-
-                    # Now check the level
-                    if (depth >= abs(level)):
-                        logger.info("Skipped: %s", relRoot)
-                        results['dirsSkipped'] += 1
-                        if (detailedResults):
-                            results['dirsSkippedList'].append(relRoot)
-                        continue
-
-                # Should the directory be traversed?
-                if (relRoot != '.' and
-                        not _checkShouldCopy(relRoot, False, includeDirPatterns, excludeDirPatterns)):
-                    logger.info("Skipped: %s", relRoot)
-                    results['dirsSkipped'] += 1
-                    if (detailedResults):
-                        results['dirsSkippedList'].append(relRoot)
-                    continue
-
-                # Make sure the root directory exists at the destination
-                dstRoot = dst
-                if (relRoot != '.'):
-                    dstRoot = os.path.join(dst, relRoot)
-                if (not os.path.isdir(dstRoot)):
-                    mkdir(dstRoot)
-
-                if (relRoot != '.'):
-                    if (os.path.isdir(dstRoot)):
-                        results['dirsCopied'] += 1
-                        if (detailedResults):
-                            results['dirsCopiedList'].append(relRoot)
-                    else:
-                        logger.exception("Failed: %s", relRoot)
-                        results['dirsFailed'] += 1
-                        if (detailedResults):
-                            results['dirsFailedList'].append(relRoot)
-                        continue
-
-                for file in files:
-                    filePath = os.path.join(relRoot, file)
-                    srcFullPath = os.path.join(src, root, file)
-                    dstFullPath = os.path.join(dst, filePath)
-
-                    # Copy the file
-                    result = _copyFile(srcFullPath, dstFullPath, includes=includeFilePatterns,
-                                       excludes=excludeFilePatterns, forceOverwrite=forceOverwrite,
-                                       preserveStats=preserveStats)
-                    if (result == 1):
-                        logger.info("Copied: %s => %s", filePath, dstFullPath)
-                        results['filesCopied'] += 1
-                        if (detailedResults):
-                            results['filesCopiedList'].append(filePath)
-                    elif (result == 0):
-                        logger.info("Skipped: %s", filePath)
-                        results['filesSkipped'] += 1
-                        if (detailedResults):
-                            results['filesSkippedList'].append(filePath)
-                    else:
-                        logger.error("Failed: %s => %s", filePath, dstFullPath)
-                        results['filesFailed'] += 1
-                        if (detailedResults):
-                            results['filesFailedList'].append(filePath)
-        else:
-            logger.error("Source path is not valid: %s", src)
-            results['filesFailed'] += 1
-    else:
+    if _isSamePath(src, dst):
         logger.error("Cannot perform a copy to the same location.")
-        results['dirsFailed'] += 1
+        results["dirsFailed"] += 1
+        return results
+
+    if os.path.isfile(src) or (not followLinks and os.path.islink(src)):
+        if os.path.isdir(dst):
+            dst = os.path.join(dst, os.path.basename(src))
+        result = _copyFile(src, dst, include_file_patterns, exclude_file_patterns, forceOverwrite=forceOverwrite)
+        _record_file_result(results, result, src, dst, detailedResults)
+        return results
+
+    if not os.path.isdir(src):
+        logger.error("Source path is not valid: %s", src)
+        results["filesFailed"] += 1
+        return results
+
+    if not os.path.isdir(dst):
+        mkdir(dst)
+
+    max_depth = _getTreeDepth(src)
+
+    # Traverse bottom-up to ensure correct behaviour for include/exclude patterns.
+    for root, dirs, files in os.walk(src, topdown=False, followlinks=followLinks):
+        rel_root = os.path.relpath(root, src)
+
+        logger.debug("Processing Directory: %s", rel_root)
+
+        if os.path.islink(root) and not followLinks:
+            logger.info("Skipped: %s", rel_root)
+            results["dirsSkipped"] += 1
+            if detailedResults:
+                results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+            continue
+
+        if level != 0:
+            depth = 0 if rel_root == "." else rel_root.count(os.path.sep) + 1
+            if level < 0:
+                depth = max_depth - depth
+            if depth >= abs(level):
+                logger.info("Skipped: %s", rel_root)
+                results["dirsSkipped"] += 1
+                if detailedResults:
+                    results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+                continue
+
+        if rel_root != "." and not _checkShouldCopy(rel_root, False, include_dir_patterns, exclude_dir_patterns):
+            logger.info("Skipped: %s", rel_root)
+            results["dirsSkipped"] += 1
+            if detailedResults:
+                results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+            continue
+
+        dst_root = dst if rel_root == "." else os.path.join(dst, rel_root)
+        if not os.path.isdir(dst_root):
+            mkdir(dst_root)
+
+        if rel_root != ".":
+            if os.path.isdir(dst_root):
+                results["dirsCopied"] += 1
+                if detailedResults:
+                    results["dirsCopiedList"].append(rel_root)  # type: ignore[union-attr]
+            else:
+                logger.exception("Failed: %s", rel_root)
+                results["dirsFailed"] += 1
+                if detailedResults:
+                    results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
+                continue
+
+        for file in files:
+            file_path = os.path.join(rel_root, file)
+            src_full = os.path.join(src, root, file)
+            dst_full = os.path.join(dst, file_path)
+            result = _copyFile(
+                src_full, dst_full,
+                includes=include_file_patterns,
+                excludes=exclude_file_patterns,
+                forceOverwrite=forceOverwrite,
+                preserveStats=preserveStats,
+            )
+            _record_file_result(results, result, file_path, dst_full, detailedResults)
 
     return results
 
 
-'''
-Creats a new directory at the specified path. This function will create all parent directories that are missing in the
-given path.
+def mkdir(path: str) -> bool:
+    """Create a directory at *path*, including all missing parent directories.
 
-:type path:string
-:param path: The path of the new directory to create.
+    Args:
+        path: The path of the directory to create.
 
-:rtype:bool
-:return: Returns True if the directory was successfully created, otherwise False.
-'''
-
-
-def mkdir(path):
-    if (os.path.exists(path)):
+    Returns:
+        True if the directory exists after the call, False otherwise.
+    """
+    if os.path.exists(path):
         return os.path.isdir(path)
 
-    # Determine if the parent directory exists, if not attempt to create it
-    pair = os.path.split(path)
-    if (pair[0] != '' and not os.path.isdir(pair[0])):
-        mkdir(pair[0])
+    parent, _ = os.path.split(path)
+    if parent and not os.path.isdir(parent):
+        mkdir(parent)
 
-    # Now does the parent directory exist?
-    if (pair[0] != '' and not os.path.isdir(pair[0])):
+    if parent and not os.path.isdir(parent):
         return False
 
-    # Attempt to create the directory
     os.mkdir(path)
-
     logger.debug("Created: %s", path)
-
     return os.path.isdir(path)
 
 
-'''
-Creates an exact copy of the given source to the destination. Copies all files and directories from source to the
-destination and removes any file or directory present in the destination that is not also in the source.
+def mirror(
+    src: str,
+    dst: str,
+    includeFiles: list[str] | None = None,
+    includeDirs: list[str] | None = None,
+    excludeFiles: list[str] | None = None,
+    excludeDirs: list[str] | None = None,
+    level: int = 0,
+    followLinks: bool = False,
+    forceOverwrite: bool = False,
+    preserveStats: bool = True,
+    detailedResults: bool = False,
+) -> MirrorResults:
+    """Create an exact copy of *src* at *dst*, removing destination-only files and directories.
 
-:type src:string
-:param src: The source path to copy from
+    Args:
+        src: The source path to mirror from.
+        dst: The destination path to mirror to.
+        includeFiles: Patterns for files to include; prefix regex with ``re:``.
+        includeDirs: Patterns for directories to include; prefix regex with ``re:``.
+        excludeFiles: Patterns for files to exclude; prefix regex with ``re:``.
+        excludeDirs: Patterns for directories to exclude; prefix regex with ``re:``.
+        level: Max depth (0 = all; positive = from top; negative = from bottom).
+        followLinks: Traverse symbolic links as directories.
+        forceOverwrite: Overwrite destination files even if they are newer.
+        preserveStats: Copy mode, atime, mtime, and flags to the destination.
+        detailedResults: Populate per-item list fields in the returned dict.
 
-:type dst:string
-:param dst: The destination path to copy to
-
-:type includeFiles:array
-:param includeFiles: A list of regex and wildcard patterns of files to include during the operation.
-                     Files not matching at least one pattern in the include list will be skipped.
-                     Regex patterns must be prefixed with re:
-
-:type includeDirs:array
-:param includeDirs: A list of regex and wildcard patterns of directory names to include during the operation.
-                    Directories not matching at least one pattern in the include list will be skipped.
-                    Regex patterns must be prefixed with re:
-
-:type excludeFiles:array
-:param excludeFiles: A list of regex and wildcard patterns of files to exclude during the operation.
-                     Regex patterns must be prefixed with re:
-
-:type excludeDirs:array
-:param excludeDirs: A list of regex and wildcard patterns of directory names to exclude during the operation.
-                    Regex patterns must be prefixed with re:
-
-:type level:int
-:param level: The maximum depth to traverse in the source directory tree.
-               A value of 0 traverses the entire tree.
-               A positive value traverses N levels from the top with value 1 being the source root.
-               A negative value traverses N levels from the bottom of the source tree.
-
-:type followLinks:bool
-:param followLinks: Set to true to traverse through symbolic links.
-
-:type forceOverwrite:bool
-:param forceOverwrite: Set to true to overwrite destination files even if they are newer.
-
-:type preserveStats:bool
-:param preserveStats: Set to True to copy the source file stats to the destination.
-
-:type detailedResults:bool
-:param detailedResults: Set to True to include additional details in the results containing a list of all files and
-                        directories that were skipped or failed during the operation.
-
-:rtype:dict
-:return: Returns a dictionary containing the following stats:
-         'filesCopied':int, 'filesFailed':int, 'filesRemoved':int, 'filesSkipped':int, 'dirsCopied':int,
-         'dirsFailed':int, 'dirsRemoved':int, 'dirsSkipped':int
-         If detailedResults is set to True also includes the following:
-         'filesCopiedList':list, 'filesFailedList':list, 'filesRemovedList':list, 'filesSkippedList':list,
-         'dirsCopiedList':list, 'dirsFailedList':list, 'dirsRemovedList':list, 'dirsSkippedList':list
-'''
-
-
-def mirror(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, excludeDirs=None, level=0,
-           followLinks=False, forceOverwrite=False, preserveStats=True, detailedResults=False):
-    # Always work with absolute paths
+    Returns:
+        A :class:`MirrorResults` dict with copy and removal statistics.
+    """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
 
-    # Attempt to copy everything
-    results = copy(src, dst, includeFiles=includeFiles, includeDirs=includeDirs, excludeFiles=excludeFiles,
-                   excludeDirs=excludeDirs, level=level, followLinks=followLinks, forceOverwrite=forceOverwrite,
-                   preserveStats=preserveStats, detailedResults=True)
+    copy_results = copy(
+        src, dst,
+        includeFiles=includeFiles, includeDirs=includeDirs,
+        excludeFiles=excludeFiles, excludeDirs=excludeDirs,
+        level=level, followLinks=followLinks,
+        forceOverwrite=forceOverwrite, preserveStats=preserveStats,
+        detailedResults=True,
+    )
 
-    # Add the additional stats not included by copy
-    results['filesRemoved'] = 0
-    results['dirsRemoved'] = 0
-    if (detailedResults):
-        results['filesRemovedList'] = []
-        results['dirsRemovedList'] = []
-    # Add the exclude patterns to the skipped lists so they are not removed
+    results: MirrorResults = cast(MirrorResults, copy_results)
+    results["filesRemoved"] = 0
+    results["dirsRemoved"] = 0
+    if detailedResults:
+        results["filesRemovedList"] = []
+        results["dirsRemovedList"] = []
+
+    # Keep excluded items from being deleted during the removal pass.
     if excludeDirs:
-        results['dirsSkippedList'] += excludeDirs
+        results["dirsSkippedList"].extend(excludeDirs)  # type: ignore[union-attr]
     if excludeFiles:
-        results['filesSkippedList'] += excludeFiles
+        results["filesSkippedList"].extend(excludeFiles)  # type: ignore[union-attr]
 
-    # Determine the max depth of src so that we don't go beyond that level in dst (if they're different)
-    maxDepth = _getTreeDepth(src)
+    max_depth = _getTreeDepth(src)
 
-    # Now traverse through the destination and remove anything not also in source
+    # Build lookup sets once for O(1) membership tests during the removal walk.
+    skipped_dirs: set[str] = set(results.get("dirsSkippedList") or [])
+    failed_dirs: set[str] = set(results.get("dirsFailedList") or [])
+    skipped_files: set[str] = set(results.get("filesSkippedList") or [])
+    failed_files: set[str] = set(results.get("filesFailedList") or [])
+
     for root, dirs, files in os.walk(dst, topdown=False, followlinks=followLinks):
-        relRoot = os.path.relpath(root, dst)
+        rel_root = os.path.relpath(root, dst)
 
-        # Make sure we are removing files/dirs only at the desired depth
-        if (level != 0):
-            # Determine the current depth of relRoot
-            depth = 0
-            if (relRoot != '.'):
-                depth = relRoot.count(os.path.sep) + 1
-
-            if (level < 0):
-                depth = maxDepth - depth
-
-            # Now check the level
-            if (depth >= abs(level)):
+        if level != 0:
+            depth = 0 if rel_root == "." else rel_root.count(os.path.sep) + 1
+            if level < 0:
+                depth = max_depth - depth
+            if depth >= abs(level):
                 continue
 
-        # Don't remove any dirs that are in the skipped or failed lists
-        dirSkipped = False
-        for skippedDir in results['dirsSkippedList']:
-            if (relRoot == skippedDir):
-                dirSkipped = True
-                break
-        if (not dirSkipped):
-            for skippedDir in results['dirsFailedList']:
-                if (relRoot == skippedDir):
-                    dirSkipped = True
-                    break
+        if rel_root in skipped_dirs or rel_root in failed_dirs:
+            continue
 
-        if (not dirSkipped):
-            # Go through the files in the directory and remove those not found in src and not skipped or failed
-            for file in files:
-                filePath = os.path.join(root, file)
-                relFilePath = os.path.join(relRoot, file)
+        for file in files:
+            file_path = os.path.join(root, file)
+            rel_file_path = os.path.join(rel_root, file)
+            if rel_file_path in skipped_files or rel_file_path in failed_files:
+                continue
+            if not os.path.exists(os.path.join(src, rel_file_path)):
+                try:
+                    os.remove(file_path)
+                    results["filesRemoved"] += 1
+                    if detailedResults:
+                        results["filesRemovedList"].append(rel_file_path)  # type: ignore[union-attr]
+                except OSError:
+                    results["filesFailedList"].append(rel_file_path)  # type: ignore[union-attr]
 
-                # Was the file skipped or failed?
-                fileSkipped = False
-                for skippedFile in results['filesSkippedList']:
-                    if (relFilePath == skippedFile):
-                        fileSkipped = True
-                        break
-                if (not fileSkipped):
-                    for failedFile in results['filesFailedList']:
-                        if (relFilePath == failedFile):
-                            fileSkipped = True
-                            break
+        if not os.path.exists(os.path.join(src, rel_root)):
+            if not os.listdir(root):
+                try:
+                    os.rmdir(root)
+                    results["dirsRemoved"] += 1
+                    if detailedResults:
+                        results["dirsRemovedList"].append(rel_root)  # type: ignore[union-attr]
+                except OSError:
+                    results["dirsFailed"] += 1
+                    if detailedResults:
+                        results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
+            else:
+                results["dirsFailed"] += 1
+                if detailedResults:
+                    results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
 
-                if (not fileSkipped):
-                    srcFilePath = os.path.join(src, relFilePath)
-                    if (not os.path.exists(srcFilePath)):
-                        try:
-                            os.remove(filePath)
-                            results['filesRemoved'] += 1
-                            if (detailedResults):
-                                results['filesRemovedList'].append(relFilePath)
-                        except OSError:
-                            results['filesFailedList'].append(relFilePath)
-
-            # Should the directory be deleted?
-            srcRoot = os.path.join(src, relRoot)
-            if (not os.path.exists(srcRoot)):
-                dirlist = os.listdir(root)
-                if (len(dirlist) == 0):
-                    try:
-                        os.rmdir(root)
-                        results['dirsRemoved'] += 1
-                        if (detailedResults):
-                            results['dirsRemovedList'].append(relRoot)
-                    except OSError:
-                        results['dirsFailed'] += 1
-                        if (detailedResults):
-                            results['dirsFailedList'].append(relRoot)
-                else:
-                    results['dirsFailed'] += 1
-                    if (detailedResults):
-                        results['dirsFailedList'].append(relRoot)
-
-    # If detailedResults was not desired remove those entries from the results
-    if (not detailedResults):
-        results['filesCopiedList'] = None
-        results['filesFailedList'] = None
-        results['filesSkippedList'] = None
-        results['dirsCopiedList'] = None
-        results['dirsFailedList'] = None
-        results['dirsSkippedList'] = None
+    if not detailedResults:
+        for key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
+                    "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
+            results.pop(key, None)  # type: ignore[misc]
 
     return results
 
 
-'''
-Moves all files and folders from the given source directory to the destination.
+def move(
+    src: str,
+    dst: str,
+    includeFiles: list[str] | None = None,
+    includeDirs: list[str] | None = None,
+    excludeFiles: list[str] | None = None,
+    excludeDirs: list[str] | None = None,
+    level: int = 0,
+    followLinks: bool = False,
+    forceOverwrite: bool = False,
+    preserveStats: bool = True,
+    detailedResults: bool = False,
+) -> MoveResults:
+    """Move all files and folders from *src* to *dst*.
 
-:type src:string
-:param src: The source path to move from
+    Args:
+        src: The source path to move from.
+        dst: The destination path to move to.
+        includeFiles: Patterns for files to include; prefix regex with ``re:``.
+        includeDirs: Patterns for directories to include; prefix regex with ``re:``.
+        excludeFiles: Patterns for files to exclude; prefix regex with ``re:``.
+        excludeDirs: Patterns for directories to exclude; prefix regex with ``re:``.
+        level: Max depth (0 = all; positive = from top; negative = from bottom).
+        followLinks: Traverse symbolic links as directories.
+        forceOverwrite: Overwrite destination files even if they are newer.
+        preserveStats: Copy mode, atime, mtime, and flags to the destination.
+        detailedResults: Populate per-item list fields in the returned dict.
 
-:type dst:string
-:param dst: The destination path to move to
-
-:type includeFiles:array
-:param includeFiles: A list of regex and wildcard patterns of files to include during the operation.
-                     Files not matching at least one pattern in the include list will be skipped.
-                     Regex patterns must be prefixed with re:
-
-:type includeDirs:array
-:param includeDirs: A list of regex and wildcard patterns of directory names to include during the operation.
-                    Directories not matching at least one pattern in the include list will be skipped.
-                    Regex patterns must be prefixed with re:
-
-:type excludeFiles:array
-:param excludeFiles: A list of regex and wildcard patterns of files to exclude during the operation.
-                     Regex patterns must be prefixed with re:
-
-:type excludeDirs:array
-:param excludeDirs: A list of regex and wildcard patterns of directory names to exclude during the operation.
-                    Regex patterns must be prefixed with re:
-
-:type level:int
-:param level: The maximum depth to traverse in the source directory tree.
-               A value of 0 traverses the entire tree.
-               A positive value traverses N levels from the top with value 1 being the source root.
-               A negative value traverses N levels from the bottom of the source tree.
-
-:type followLinks:bool
-:param followLinks: Set to true to traverse through symbolic links.
-
-:type forceOverwrite:bool
-:param forceOverwrite: Set to true to overwrite destination files even if they are newer.
-
-:type preserveStats:bool
-:param preserveStats: Set to True to copy the source file stats to the destination.
-
-:type detailedResults:bool
-:param detailedResults: Set to True to include additional details in the results containing a list of all files and
-                        directories that were skipped or failed during the operation.
-
-:rtype:dict
-:return: Returns a dictionary containing the following stats:
-         'filesMoved', 'filesFailed', 'filesSkipped', 'dirsMoved', 'dirsFailed', 'dirsSkipped'
-         If detailedResults is set to True also includes the following:
-         'filesMovedList':list, 'filesFailedList':list, 'filesSkippedList':list,
-         'dirsMovedList':list, 'dirsFailedList':list, 'dirsSkippedList':list
-'''
-
-
-def move(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, excludeDirs=None, level=0,
-         followLinks=False, forceOverwrite=False, preserveStats=True, detailedResults=False):
-    # Always work with absolute paths
+    Returns:
+        A :class:`MoveResults` dict with move statistics.
+    """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
 
-    # Attempt to copy everything
-    copyResults = copy(src, dst, includeFiles=includeFiles, includeDirs=includeDirs, excludeFiles=excludeFiles,
-                       excludeDirs=excludeDirs, level=level, followLinks=followLinks, forceOverwrite=forceOverwrite,
-                       preserveStats=preserveStats, detailedResults=True)
+    copy_results = copy(
+        src, dst,
+        includeFiles=includeFiles, includeDirs=includeDirs,
+        excludeFiles=excludeFiles, excludeDirs=excludeDirs,
+        level=level, followLinks=followLinks,
+        forceOverwrite=forceOverwrite, preserveStats=preserveStats,
+        detailedResults=True,
+    )
 
-    # Delete the source tree. Don't remove anything that was in the list of failed or skipped files/dirs
+    # Build case-insensitive lookup sets for the source-deletion walk.
+    failed_dirs_lower = {d.lower() for d in copy_results["dirsFailedList"]}   # type: ignore[union-attr]
+    skipped_dirs_lower = {d.lower() for d in copy_results["dirsSkippedList"]} # type: ignore[union-attr]
+    failed_files_lower = {f.lower() for f in copy_results["filesFailedList"]} # type: ignore[union-attr]
+    skipped_files_lower = {f.lower() for f in copy_results["filesSkippedList"]}  # type: ignore[union-attr]
+
     for root, dirs, files in os.walk(src, topdown=False):
-        relRoot = os.path.relpath(root, src)
+        rel_root = os.path.relpath(root, src)
 
-        deleteDir = True
-        # Was this directory skipped or failed?
-        for failedDir in copyResults['dirsFailedList']:
-            if (relRoot.lower() == failedDir.lower()):
-                deleteDir = False
-                break
-        for skippedDir in copyResults['dirsSkippedList']:
-            if (relRoot.lower() == skippedDir.lower()):
-                deleteDir = False
-                break
+        if rel_root.lower() in failed_dirs_lower or rel_root.lower() in skipped_dirs_lower:
+            continue
 
-        if (deleteDir):
-            # Attempt to delete all files in directory
-            for file in files:
-                filePath = os.path.join(root, file)
-                relFilePath = os.path.join(relRoot, file)
-                if (not os.path.lexists(filePath)):
-                    continue
+        for file in files:
+            file_path = os.path.join(root, file)
+            rel_file_path = os.path.join(rel_root, file)
+            if not os.path.lexists(file_path):
+                continue
+            if rel_file_path.lower() in failed_files_lower or rel_file_path.lower() in skipped_files_lower:
+                continue
+            try:
+                os.remove(file_path)
+            except OSError:
+                copy_results["filesFailedList"].append(rel_file_path)  # type: ignore[union-attr]
 
-                deleteFile = True
-                # Was the file skipped or failed?
-                for failedFile in copyResults['filesFailedList']:
-                    if (relFilePath.lower() == failedFile.lower()):
-                        deleteFile = False
-                        break
-                for skippedFile in copyResults['filesSkippedList']:
-                    if (relFilePath.lower() == skippedFile.lower()):
-                        deleteFile = False
-                        break
+        if not os.listdir(root):
+            if os.path.islink(root):
+                os.unlink(root)
+            else:
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    copy_results["dirsFailed"] += 1
 
-                if (deleteFile):
-                    try:
-                        os.remove(filePath)
-                    except OSError:
-                        copyResults['filesFailedList'].append(relFilePath)
-
-            # If all files were deleted it is safe to delete the directory
-            dirlist = os.listdir(root)
-            if (len(dirlist) == 0):
-                if (os.path.islink(root)):
-                    os.unlink(root)
-                else:
-                    try:
-                        os.rmdir(root)
-                    except OSError:
-                        copyResults['dirsFailed'].append(root)
-
-    # Transpose results and return
-    results = {}
-    results['filesMoved'] = copyResults['filesCopied']
-    results['filesFailed'] = copyResults['filesFailed']
-    results['filesSkipped'] = copyResults['filesSkipped']
-    results['dirsMoved'] = copyResults['dirsCopied']
-    results['dirsFailed'] = copyResults['dirsFailed']
-    results['dirsSkipped'] = copyResults['dirsSkipped']
-    if (detailedResults):
-        results['filesMovedList'] = copyResults['filesCopiedList']
-        results['filesFailedList'] = copyResults['filesFailedList']
-        results['filesSkippedList'] = copyResults['filesSkippedList']
-        results['dirsMovedList'] = copyResults['dirsCopiedList']
-        results['dirsFailedList'] = copyResults['dirsFailedList']
-        results['dirsSkippedList'] = copyResults['dirsSkippedList']
+    results: MoveResults = {
+        "filesMoved": copy_results["filesCopied"],
+        "filesFailed": copy_results["filesFailed"],
+        "filesSkipped": copy_results["filesSkipped"],
+        "dirsMoved": copy_results["dirsCopied"],
+        "dirsFailed": copy_results["dirsFailed"],
+        "dirsSkipped": copy_results["dirsSkipped"],
+    }
+    if detailedResults:
+        results["filesMovedList"] = copy_results["filesCopiedList"]   # type: ignore[union-attr]
+        results["filesFailedList"] = copy_results["filesFailedList"]  # type: ignore[union-attr]
+        results["filesSkippedList"] = copy_results["filesSkippedList"]  # type: ignore[union-attr]
+        results["dirsMovedList"] = copy_results["dirsCopiedList"]     # type: ignore[union-attr]
+        results["dirsFailedList"] = copy_results["dirsFailedList"]    # type: ignore[union-attr]
+        results["dirsSkippedList"] = copy_results["dirsSkippedList"]  # type: ignore[union-attr]
 
     return results
 
 
-'''
-Synchronizes all files and folders between the two given paths.
+def sync(
+    path1: str,
+    path2: str,
+    includeFiles: list[str] | None = None,
+    includeDirs: list[str] | None = None,
+    excludeFiles: list[str] | None = None,
+    excludeDirs: list[str] | None = None,
+    level: int = 0,
+    followLinks: bool = False,
+    forceOverwrite: bool = False,
+    preserveStats: bool = True,
+    detailedResults: bool = False,
+) -> CopyResults:
+    """Synchronize files and folders between *path1* and *path2* (bi-directional copy).
 
-This is equivalent to making the following calls:
-copy(path1, path2)
-copy(path2, path1)
+    Equivalent to ``copy(path1, path2)`` followed by ``copy(path2, path1)``.
 
-:type path1:string
-:param path1: The first path to synchronize
+    Args:
+        path1: First path to synchronize.
+        path2: Second path to synchronize.
+        includeFiles: Patterns for files to include; prefix regex with ``re:``.
+        includeDirs: Patterns for directories to include; prefix regex with ``re:``.
+        excludeFiles: Patterns for files to exclude; prefix regex with ``re:``.
+        excludeDirs: Patterns for directories to exclude; prefix regex with ``re:``.
+        level: Max depth (0 = all; positive = from top; negative = from bottom).
+        followLinks: Traverse symbolic links as directories.
+        forceOverwrite: Overwrite destination files even if they are newer.
+        preserveStats: Copy mode, atime, mtime, and flags to the destination.
+        detailedResults: Populate per-item list fields in the returned dict.
 
-:type path2:string
-:param path2: The second path to synchronize
-
-:type includeFiles:array
-:param includeFiles: A list of regex and wildcard patterns of files to include during the operation.
-                     Files not matching at least one pattern in the include list will be skipped.
-                     Regex patterns must be prefixed with re:
-
-:type includeDirs:array
-:param includeDirs: A list of regex and wildcard patterns of directory names to include during the operation.
-                    Directories not matching at least one pattern in the include list will be skipped.
-                    Regex patterns must be prefixed with re:
-
-:type excludeFiles:array
-:param excludeFiles: A list of regex and wildcard patterns of files to exclude during the operation.
-                     Regex patterns must be prefixed with re:
-
-:type excludeDirs:array
-:param excludeDirs: A list of regex and wildcard patterns of directory names to exclude during the operation.
-                    Regex patterns must be prefixed with re:
-
-:type level:int
-:param level: The maximum depth to traverse in the source directory tree.
-               A value of 0 traverses the entire tree.
-               A positive value traverses N levels from the top with value 1 being the source root.
-               A negative value traverses N levels from the bottom of the source tree.
-
-:type followLinks:bool
-:param followLinks: Set to true to traverse through symbolic links.
-
-:type forceOverwrite:bool
-:param forceOverwrite: Set to true to overwrite destination files even if they are newer.
-
-:type preserveStats:bool
-:param preserveStats: Set to True to copy the source file stats to the destination.
-
-:type detailedResults:bool
-:param detailedResults: Set to True to include additional details in the results containing a list of all files and
-                        directories that were skipped or failed during the operation.
-
-:rtype:dict
-:return: Returns a dictionary containing the following stats:
-         'filesCopied':int, 'filesFailed':int, 'filesSkipped':int, 'dirsCopied':int, 'dirsFailed':int, 'dirsSkipped':int
-         If detailedResults is set to True also includes the following:
-         'filesFailedList':list, 'filesSkippedList':list, 'dirsFailedList':list, 'dirsSkippedList':list
-'''
-
-
-def sync(path1, path2, includeFiles=None, includeDirs=None, excludeFiles=None, excludeDirs=None, level=0,
-         followLinks=False, forceOverwrite=False, preserveStats=True, detailedResults=False):
-    # Always work with absolute paths
+    Returns:
+        A :class:`CopyResults` dict with combined statistics from both directions.
+    """
     path1 = os.path.abspath(path1)
     path2 = os.path.abspath(path2)
 
-    results = copy(path1, path2, includeFiles=includeFiles, includeDirs=includeDirs, excludeFiles=excludeDirs,
-                   level=level, followLinks=followLinks, forceOverwrite=forceOverwrite, preserveStats=preserveStats,
-                   detailedResults=True)
-    results2 = copy(path2, path1, includeFiles=includeFiles, includeDirs=includeDirs, excludeFiles=excludeDirs,
-                    level=level, followLinks=followLinks, forceOverwrite=forceOverwrite, preserveStats=preserveStats,
-                    detailedResults=True)
+    results = copy(
+        path1, path2,
+        includeFiles=includeFiles, includeDirs=includeDirs,
+        excludeFiles=excludeDirs,  # NOTE: preserving original behaviour
+        level=level, followLinks=followLinks,
+        forceOverwrite=forceOverwrite, preserveStats=preserveStats,
+        detailedResults=True,
+    )
+    results2 = copy(
+        path2, path1,
+        includeFiles=includeFiles, includeDirs=includeDirs,
+        excludeFiles=excludeDirs,  # NOTE: preserving original behaviour
+        level=level, followLinks=followLinks,
+        forceOverwrite=forceOverwrite, preserveStats=preserveStats,
+        detailedResults=True,
+    )
 
-    # Add new entries from results2 to the various lists of results
-    for dpath in results2['filesCopiedList']:
-        addPath = True
-        for spath in results['filesCopiedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['filesCopiedList'].append(dpath)
-    for dpath in results2['filesFailedList']:
-        addPath = True
-        for spath in results['filesFailedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['filesFailedList'].append(dpath)
-    for dpath in results2['filesSkippedList']:
-        addPath = True
-        for spath in results['filesSkippedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['filesSkippedList'].append(dpath)
-    for dpath in results2['dirsCopiedList']:
-        addPath = True
-        for spath in results['dirsCopiedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['dirsCopiedList'].append(dpath)
-    for dpath in results2['dirsFailedList']:
-        addPath = True
-        for spath in results['dirsFailedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['dirsFailedList'].append(dpath)
-    for dpath in results2['dirsSkippedList']:
-        addPath = True
-        for spath in results['dirsSkippedList']:
-            if (spath == dpath):
-                addPath = False
-                break
-        if (addPath):
-            results['dirsSkippedList'].append(dpath)
+    # Merge results from both directions, avoiding duplicates.
+    for list_key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
+                     "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
+        results[list_key] = _merge_unique(  # type: ignore[literal-required]
+            results[list_key],   # type: ignore[literal-required]
+            results2[list_key],  # type: ignore[literal-required]
+        )
 
-    # Update the stats
-    results['filesCopied'] = len(results['filesCopiedList'])
-    results['filesFailed'] = len(results['filesFailedList'])
-    results['filesSkipped'] = len(results['filesSkippedList'])
-    results['dirsCopied'] = len(results['dirsCopiedList'])
-    results['dirsFailed'] = len(results['dirsFailedList'])
-    results['dirsSkipped'] = len(results['dirsSkippedList'])
+    results["filesCopied"] = len(results["filesCopiedList"])   # type: ignore[arg-type]
+    results["filesFailed"] = len(results["filesFailedList"])   # type: ignore[arg-type]
+    results["filesSkipped"] = len(results["filesSkippedList"]) # type: ignore[arg-type]
+    results["dirsCopied"] = len(results["dirsCopiedList"])     # type: ignore[arg-type]
+    results["dirsFailed"] = len(results["dirsFailedList"])     # type: ignore[arg-type]
+    results["dirsSkipped"] = len(results["dirsSkippedList"])   # type: ignore[arg-type]
 
-    # If detailedResults was not desired remove those entries from the results
-    if (not detailedResults):
-        results['filesCopiedList'] = None
-        results['filesFailedList'] = None
-        results['filesSkippedList'] = None
-        results['dirsCopiedList'] = None
-        results['dirsFailedList'] = None
-        results['dirsSkippedList'] = None
+    if not detailedResults:
+        for key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
+                    "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
+            results.pop(key, None)  # type: ignore[misc]
 
     return results
 
 
-'''
-Checks if the two given paths point to the same place.
-
-:type src:string
-:param src: The source path to check.
-
-:type dst:string
-:param dst: The destination path to check.
-
-:rtype:bool
-:return: Returns True if src and dst point to the same location, otherwise False.
-'''
-
-
-def _isSamePath(src, dst):
-    # Mac/Unix
-    if (hasattr(os.path, 'samefile')):
+def _isSamePath(src: str, dst: str) -> bool:
+    """Return True if *src* and *dst* resolve to the same filesystem location."""
+    if hasattr(os.path, "samefile"):
         try:
             return os.path.samefile(src, dst)
         except OSError:
             return False
-
-    # All other platforms
-    return (os.path.normcase(os.path.abspath(src)) ==
-            os.path.normcase(os.path.abspath(dst)))
+    return os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst))
 
 
-'''
-Normalizes the given pattern by adding wildcards when path has more levels.
+def _normalizeDirPattern(pattern: _Pattern, path: str) -> _Pattern:
+    """Expand *pattern* with wildcards so it matches *path* at any depth.
 
-Note that on Windows regular expression patterns have issues with when using the path separator '\' character.
-This function will switch all path separators in a regex pattern to use '/' instead.
+    On Windows, regex path separators are normalised to ``/``.
 
-e.g.
-Given a path 'Level1' and pattern '*/Level2' would return '*/Level2'
-Given a path 'Level1/Level2/Level3' and a pattern 'Level1' would return 'Level1/*/*'
+    Examples::
 
-:type path:string or regex
-:param path: The pattern to normalize
-
-:type path:string
-:param path: The path to normalize the pattern for
-
-:rtype:string or regex
-:return: A string or regex object of the normalized pattern for the given path
-'''
-
-
-def _normalizeDirPattern(pattern: str | re.Pattern[str], path: str) -> str | re.Pattern[str]:
-    bIsRegex = False
-    tmpPattern: str
+        _normalizeDirPattern("*", "Level1")                              → "*"
+        _normalizeDirPattern("*/Level2", "Level1")                       → "*/Level2"
+        _normalizeDirPattern("Level1", "Level1/Level2/Level3")           → "Level1/*/*"
+    """
+    is_regex = False
+    tmp: str
     if isinstance(pattern, re.Pattern):
-        tmpPattern = pattern.pattern
-        bIsRegex = True
-    elif pattern.startswith('re:'):
-        tmpPattern = pattern[3:]
-        bIsRegex = True
+        tmp = pattern.pattern
+        is_regex = True
+    elif pattern.startswith("re:"):
+        tmp = pattern[3:]
+        is_regex = True
     else:
-        tmpPattern = pattern
+        tmp = pattern
 
-    numPathSep = path.count(os.path.sep)
-    numPatternSep = tmpPattern.count(os.path.sep)
+    num_path_sep = path.count(os.path.sep)
+    num_pattern_sep = tmp.count(os.path.sep)
 
-    # When the path has more levels, fill in the pattern with wildcards
-    if (numPathSep > numPatternSep):
-        while (numPathSep > numPatternSep):
-            if (bIsRegex):
-                tmpPattern = tmpPattern + "/.*" if tmpPattern != '' else '.*'
-            else:
-                tmpPattern = os.path.join(tmpPattern, "*")
-            numPatternSep = numPatternSep + 1
+    while num_path_sep > num_pattern_sep:
+        tmp = (tmp + "/.*" if tmp else ".*") if is_regex else os.path.join(tmp, "*")
+        num_pattern_sep += 1
 
-    if (bIsRegex):
-        return re.compile(tmpPattern)
-    else:
-        return tmpPattern
+    return re.compile(tmp) if is_regex else tmp
 
 
-'''
-Normalizes the given pattern by adding wildcards when path has more levels.
+def _normalizeFilePattern(pattern: _Pattern, filepath: str) -> _Pattern:
+    """Expand *pattern* with wildcards so it matches *filepath* at any depth.
 
-For patterns that are already multi-level wildcards are added to the middle of the path, before the tail, as
-it is assumed the tail of the pattern is for filename matching and not just a path.
+    Wildcards are inserted before the filename tail of the pattern, not at the end.
 
-Note that on Windows regular expression patterns have issues with when using the path separator '\' character.
-This function will switch all path separators in a regex pattern to use '/' instead.
+    Examples::
 
-e.g.
-Given a filepath 'MyFile.txt' and a pattern '*.txt' will return '*.txt'
-Given a filepath 'Level1/MyFile.txt' and a pattern '*.txt' will return '*/*.txt'
-Given a filepath 'MyFile.txt' and a pattern 'Level1/*.txt' will return 'Level1/*.txt'
-Given a filepath 'Level1/Level2/MyFile.txt' and a pattern 'Level1/*.txt' will return 'Level1/*/*.txt'
-
-:type path:string or regex
-:param path: The pattern to normalize
-
-:type path:string
-:param path: The path to normalize the pattern for
-
-:rtype:string or regex
-:return: A string or regex object of the normalized pattern for the given path
-'''
-
-
-def _normalizeFilePattern(pattern: str | re.Pattern[str], filepath: str) -> str | re.Pattern[str]:
-    bIsRegex = False
-    tmpPattern: str
+        _normalizeFilePattern("*.txt", "myFile.txt")                     → "*.txt"
+        _normalizeFilePattern("*.txt", "Level1/myFile.txt")              → "*/**.txt"
+        _normalizeFilePattern("Level1/*.txt", "Level1/Level2/MyFile.txt")→ "Level1/*/*.txt"
+    """
+    is_regex = False
+    tmp: str
     if isinstance(pattern, re.Pattern):
-        tmpPattern = pattern.pattern
-        bIsRegex = True
-    elif pattern.startswith('re:'):
-        tmpPattern = pattern[3:]
-        bIsRegex = True
+        tmp = pattern.pattern
+        is_regex = True
+    elif pattern.startswith("re:"):
+        tmp = pattern[3:]
+        is_regex = True
     else:
-        tmpPattern = pattern
+        tmp = pattern
 
-    # Separate the file pattern from the dir/path pattern
-    patternParts = os.path.split(tmpPattern)
-    tmpPattern = patternParts[0]
+    pattern_dir, pattern_file = os.path.split(tmp)
+    tmp = pattern_dir
 
-    numPathSep = filepath.count(os.path.sep)
-    numPatternSep = tmpPattern.count(os.path.sep)
-    if (tmpPattern != ''):
-        numPatternSep = numPatternSep + 1
+    num_path_sep = filepath.count(os.path.sep)
+    num_pattern_sep = tmp.count(os.path.sep) + (1 if tmp else 0)
 
-    # When the path has more levels, fill in the pattern with wildcards
-    if (numPathSep > numPatternSep):
-        while (numPathSep > numPatternSep):
-            if (bIsRegex):
-                tmpPattern = tmpPattern + "/.*" if tmpPattern != '' else '.*'
-            else:
-                tmpPattern = os.path.join(tmpPattern, "*")
-            numPatternSep = numPatternSep + 1
+    while num_path_sep > num_pattern_sep:
+        tmp = (tmp + "/.*" if tmp else ".*") if is_regex else os.path.join(tmp, "*")
+        num_pattern_sep += 1
 
-    # Append the file pattern back
-    tmpPattern = tmpPattern + "/" + patternParts[1] if bIsRegex else os.path.join(tmpPattern, patternParts[1])
+    tmp = (tmp + "/" + pattern_file) if is_regex else os.path.join(tmp, pattern_file)
 
-    if (bIsRegex):
-        return re.compile(tmpPattern)
-    else:
-        return tmpPattern
+    return re.compile(tmp) if is_regex else tmp
 
 
-'''
-Determines if the given path will be copied given the list of includes and excludes.
-When include patterns are provided the path must match at least one of the patterns
-given and cannot be excluded
+def _checkShouldCopy(
+    path: str,
+    bIsFile: bool,
+    includes: list[_Pattern] | None,
+    excludes: list[_Pattern] | None,
+) -> bool:
+    """Return True if *path* should be copied given *includes* and *excludes*.
 
-:type path:string
-:param path: The path of the directory to check
+    When *includes* are provided the path must match at least one; excludes are not checked.
+    When only *excludes* are provided the path must not match any of them.
+    """
+    # Normalise separators for regex matching (relevant on Windows).
+    re_path = path.replace(os.path.sep, "/") if os.path.sep == "\\" else path
 
-:type bIsFile:bool
-:param bIsFile: Set to true if path is for a file
-
-:type includes:array
-:param includes: The list of compiled inclusive regex patterns to check the path against
-
-:type excludes:array
-:param excludes: The list of compiled exclusive regex patterns to check the path against
-'''
-
-
-def _checkShouldCopy(path, bIsFile, includes, excludes):
-    # The pattern will have '/' path separators (even on Windows). Make sure the path does too.
-    rePath = path
-    if (os.path.sep == '\\'):
-        rePath = path.replace(os.path.sep, '/')
-
-    # Now check the path against the include list.
-    if (includes is not None and len(includes) > 0):
-        isIncluded = False
+    if includes:
         for pattern in includes:
-            normPattern = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
+            norm = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
+            if isinstance(norm, re.Pattern):
+                if norm.match(re_path) is not None:
+                    return True
+            elif fnmatch.fnmatch(path, norm):
+                return True
+        return False
 
-            if isinstance(normPattern, re.Pattern):
-                if normPattern.match(rePath) is not None:
-                    isIncluded = True
-                    break
-            elif (fnmatch.fnmatch(path, normPattern)):
-                isIncluded = True
-                break
-        return isIncluded
-
-    # Now check the exclude lists
-    if (excludes is not None):
+    if excludes:
         for pattern in excludes:
-            normPattern = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
-
-            if isinstance(normPattern, re.Pattern):
-                if normPattern.match(rePath) is not None:
+            norm = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
+            if isinstance(norm, re.Pattern):
+                if norm.match(re_path) is not None:
                     return False
-            elif (fnmatch.fnmatch(path, normPattern)):
+            elif fnmatch.fnmatch(path, norm):
                 return False
 
     return True
 
 
-'''
-Copies a file from the give source path to the destination.
+def _copyFile(
+    src: str,
+    dst: str,
+    includes: list[_Pattern] | None = None,
+    excludes: list[_Pattern] | None = None,
+    showProgress: bool = True,
+    forceOverwrite: bool = False,
+    preserveStats: bool = True,
+) -> int:
+    """Copy the file at *src* to *dst*.
 
-:type src:string
-:param src: The path of the source file to copy.
+    Args:
+        src: Source file path.
+        dst: Destination file path.
+        includes: Compiled include patterns; the file must match at least one.
+        excludes: Compiled exclude patterns; the file must not match any.
+        showProgress: Kept for API compatibility; progress is always displayed when INFO logging is active.
+        forceOverwrite: Overwrite *dst* even if it is newer than *src*.
+        preserveStats: Copy file stats (mode, atime, mtime, flags) to *dst*.
 
-:type dst:string
-:param dst: The path of the destination to copy src to.
-
-:type includes:array
-:param includes: The list of compiled inclusive regex patterns to check the source path against.
-
-:type excludes:array
-:param excludes: The list of compiled exclusive regex patterns to check the source path against.
-
-:type showProgress:bool
-:param showProgress: Set to True to display real-time progress information about the operation. Progress is only shown
-                     to stdout and stderr.
-
-:type forceOverwrite:bool
-:param forceOverwrite: Set to True to overwrite destination files even if they are newer.
-
-:type preserveStats:bool
-:param preserveStats: Set to True to copy the source file stats to the destination.
-
-:rtype:int
-:return: Returns a value 1 if the file was copied, value 0 if the file was skipped and -1 if an error occurred.
-'''
-
-
-def _copyFile(src, dst, includes=None, excludes=None, showProgress=True, forceOverwrite=False, preserveStats=True):
-    # Only copy files
-    if (not os.path.isfile(src)):
+    Returns:
+        1 if copied, 0 if skipped, -1 on error.
+    """
+    if not os.path.isfile(src):
         return -1
-
-    # Don't copy files to the same location
-    if (_isSamePath(src, dst)):
+    if _isSamePath(src, dst):
         return -1
-
-    # Should the file be copied?
-    if (not _checkShouldCopy(src, True, includes, excludes)):
+    if not _checkShouldCopy(src, True, includes, excludes):
+        return 0
+    if not forceOverwrite and os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
         return 0
 
-    # Don't overwrite older copies of files unless explicitly desired
-    if (not forceOverwrite and os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src)):
-        return 0
+    dst_dir = os.path.split(dst)[0]
+    if not os.path.isdir(dst_dir):
+        mkdir(dst_dir)
 
-    # Make sure the directory at the destination exists
-    dstRoot = os.path.split(dst)[0]
-    if (not os.path.isdir(dstRoot)):
-        mkdir(dstRoot)
-
-    # Finally perform the copy
     logger.info("Copying: %s => %s", src, dst)
-    if (os.path.islink(src)):
+    if os.path.islink(src):
         try:
             os.symlink(os.readlink(src), dst)
         except OSError:
             return -1
     else:
-        # The number of bytes per read operation
-        maxReadLength = BUFFERSIZE_KIB * 1024
+        max_read = BUFFERSIZE_KIB * 1024
         try:
-            with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
-                bytesTotal = os.path.getsize(src)
-                bytesWritten = 0
-                while 1:
-                    buf = fsrc.read(maxReadLength)
+            with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                bytes_total = os.path.getsize(src)
+                bytes_written = 0
+                while True:
+                    buf = fsrc.read(max_read)
                     if not buf:
                         break
                     fdst.write(buf)
-
-                    bytesWritten += len(buf)
-                    _displayProgress(bytesWritten, bytesTotal)
+                    bytes_written += len(buf)
+                    _displayProgress(bytes_written, bytes_total)
         except OSError:
             return -1
 
-        # Spit out an empty line so subsequent text starts on the next line
         logger.info("")
 
-        # Copy file stats
-        if (preserveStats):
+        if preserveStats:
             _copyStats(src, dst)
 
-    # Was the copy successful?
     if os.path.exists(dst) and (os.path.islink(dst) or os.path.getsize(src) == os.path.getsize(dst)):
         return 1
-
     return -1
 
 
-'''
-Copies the stat info (mode bits, atime, mtime, flags) from src to dst.
-
-:type src:string
-:param src: The source path to copy stat info from.
-
-:type dst:string
-:param dst: The destination path to copy stat info to.
-'''
-
-
-def _copyStats(src, dst):
+def _copyStats(src: str, dst: str) -> None:
+    """Copy stat info (mode bits, atime, mtime, flags) from *src* to *dst*."""
     st = os.stat(src)
     mode = stat.S_IMODE(st.st_mode)
-    if hasattr(os, 'utime'):
+    if hasattr(os, "utime"):
         os.utime(dst, (st.st_atime, st.st_mtime))
-    if hasattr(os, 'chmod'):
+    if hasattr(os, "chmod"):
         os.chmod(dst, mode)
-    if hasattr(os, 'chflags') and hasattr(st, 'st_flags'):
+    if hasattr(os, "chflags") and hasattr(st, "st_flags"):
         try:
-            os.chflags(dst, st.st_flags)
+            os.chflags(dst, st.st_flags)  # type: ignore[attr-defined]
         except OSError as why:
-            for err in 'EOPNOTSUPP', 'ENOTSUP':
+            for err in ("EOPNOTSUPP", "ENOTSUP"):
                 if hasattr(errno, err) and why.errno == getattr(errno, err):
                     break
             else:
                 raise
 
 
-'''
-Prints the current progress for the given file operation to any stdout or stderr handler attached to logger using the
-INFO level.
+def _displayProgress(currentValue: int, totalValue: int) -> None:
+    """Write an in-place progress bar to any stdout/stderr logger handlers at INFO level.
 
-:type currentValue:int
-:param currentValue: The value representing the current progress.
-
-:type totalValue:int
-:param totalValue: The maximum value of the progress to be achieved.
-'''
-
-
-def _displayProgress(currentValue, totalValue):
-    # Displaying the progress bar should only be shown at the appropriate log level (INFO)
-    if (logger.getEffectiveLevel() > logging.INFO):
+    Args:
+        currentValue: Bytes (or units) transferred so far.
+        totalValue: Total bytes (or units) to transfer.
+    """
+    if logger.getEffectiveLevel() > logging.INFO:
         return
 
-    # Attempt to grab all available stdout/stderr streams from the list of logger handlers
-    streams = []
-    for handler in logger.handlers:
-        if (isinstance(handler, logging.StreamHandler) and
-                (handler.stream is sys.stderr or handler.stream is sys.stdout)):
-            streams.append(handler.stream)
-
-    # If no output streams were found we can't display the progress bar
-    if (len(streams) == 0):
+    streams = [
+        h.stream
+        for h in logger.handlers
+        if isinstance(h, logging.StreamHandler) and h.stream in (sys.stderr, sys.stdout)
+    ]
+    if not streams:
         return
 
-    strToDisplay = str(currentValue) + " / " + str(totalValue) + " ["
-
-    # Add the progress bar
-    maxLineLength = 80
-    percentComplete = float(currentValue) / float(totalValue)
-    currentBarValue = int(maxLineLength * percentComplete)
-    i = 0
-    while (i < maxLineLength):
-        if (i < currentBarValue):
-            strToDisplay += "="
-        elif (i == currentBarValue):
-            strToDisplay += ">"
-        else:
-            strToDisplay += " "
-        i += 1
-
-    strToDisplay += "]\r"
+    filled = int(_PROGRESS_BAR_WIDTH * currentValue / totalValue)
+    if filled >= _PROGRESS_BAR_WIDTH:
+        bar = "=" * _PROGRESS_BAR_WIDTH
+    else:
+        bar = "=" * filled + ">" + " " * (_PROGRESS_BAR_WIDTH - filled - 1)
+    line = f"{currentValue} / {totalValue} [{bar}]\r"
 
     for stream in streams:
-        stream.write(strToDisplay)
+        stream.write(line)
         stream.flush()
 
 
-'''
-Prints a table showing the results of a copy operation to the INFO log.
-
-:type results:dict
-:param results: The dictionary containing the copy results to display.
-'''
-
-
-def _displayCopyResults(results):
-    if (logger.getEffectiveLevel() > logging.ERROR):
+def _displayCopyResults(results: CopyResults | MirrorResults | MoveResults) -> None:
+    """Log a summary table of the copy/move/mirror *results* at INFO level."""
+    if logger.getEffectiveLevel() > logging.ERROR:
         return
 
     logger.info("--------------------")
     logger.info("Files:")
-    if ('filesCopied' in results):
-        logger.info("\tCopied: %d", results['filesCopied'])
-    if ('filesMoved' in results):
-        logger.info("\tMoved: %d", results['filesMoved'])
-    logger.info("\tSkipped: %d", results['filesSkipped'])
-    logger.info("\tFailed: %d", results['filesFailed'])
+    if "filesCopied" in results:
+        logger.info("\tCopied: %d", results["filesCopied"])  # type: ignore[typeddict-item]
+    if "filesMoved" in results:
+        logger.info("\tMoved: %d", results["filesMoved"])  # type: ignore[typeddict-item]
+    logger.info("\tSkipped: %d", results["filesSkipped"])
+    logger.info("\tFailed: %d", results["filesFailed"])
     logger.info("")
     logger.info("Directories:")
-    if ('dirsCopied' in results):
-        logger.info("\tCopied: %d", results['dirsCopied'])
-    if ('dirsMoved' in results):
-        logger.info("\tMoved: %d", results['dirsMoved'])
-    logger.info("\tSkipped: %d", results['dirsSkipped'])
-    logger.info("\tFailed: %d", results['dirsFailed'])
+    if "dirsCopied" in results:
+        logger.info("\tCopied: %d", results["dirsCopied"])  # type: ignore[typeddict-item]
+    if "dirsMoved" in results:
+        logger.info("\tMoved: %d", results["dirsMoved"])  # type: ignore[typeddict-item]
+    logger.info("\tSkipped: %d", results["dirsSkipped"])
+    logger.info("\tFailed: %d", results["dirsFailed"])
     logger.info("--------------------")
 
 
-'''
-Determines the maximum depth of the tree for a given path.
-
-:type path:string
-:param path: The path to compute the depth for.
-
-:rtype:int
-:return: The maximum depth of path.
-'''
-
-
-def _getTreeDepth(path):
-    maxDepth = 0
+def _getTreeDepth(path: str) -> int:
+    """Return the maximum directory depth of the tree rooted at *path*."""
+    max_depth = 0
     for root, dirs, files in os.walk(path):
-        relRoot = os.path.relpath(root, path)
-        depth = relRoot.count(os.path.sep) + 1
-        maxDepth = max(maxDepth, depth)
-    return maxDepth
+        rel_root = os.path.relpath(root, path)
+        depth = rel_root.count(os.path.sep) + 1
+        max_depth = max(max_depth, depth)
+    return max_depth
