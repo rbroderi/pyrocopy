@@ -7,7 +7,7 @@ module-name = "pyrocopy"
 
 [project]
 name = "pyrocopy314"
-version = "0.8.0"
+version = "0.9.0"
 description = "A suite of robust file copying utilities for Python."
 license = "MIT"
 keywords = [
