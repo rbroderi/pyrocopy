@@ -319,18 +319,18 @@ def test_copy_basic(tmp_path: pytest.TempPathFactory) -> None:
     dst = src + "Copy"
 
     results = pyrocopy.copy(src, dst, preserveStats=True)
-    assert results["filesCopied"] == num_files, "initial copy: wrong filesCopied"
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
+    assert results.filesCopied == num_files, "initial copy: wrong filesCopied"
+    assert results.filesFailed == 0 and results.dirsFailed == 0
 
     # Second copy — all files should be skipped (same mtime)
     results = pyrocopy.copy(src, dst, preserveStats=True)
-    assert results["filesSkipped"] == num_files, "second copy: files should be skipped"
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
+    assert results.filesSkipped == num_files, "second copy: files should be skipped"
+    assert results.filesFailed == 0 and results.dirsFailed == 0
 
     # Force overwrite
     results = pyrocopy.copy(src, dst, forceOverwrite=True, preserveStats=True)
-    assert results["filesCopied"] == num_files, "force overwrite: wrong filesCopied"
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
+    assert results.filesCopied == num_files, "force overwrite: wrong filesCopied"
+    assert results.filesFailed == 0 and results.dirsFailed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -342,19 +342,19 @@ def test_copy_depth_levels(base_src_tree: dict) -> None:
     dst = src + "Copy"
 
     results = pyrocopy.copy(src, dst, level=1)
-    assert results["filesCopied"] == 5, "level=1"
+    assert results.filesCopied == 5, "level=1"
     shutil.rmtree(dst)
 
     results = pyrocopy.copy(src, dst, level=-1)
-    assert results["filesCopied"] == 7, "level=-1"
+    assert results.filesCopied == 7, "level=-1"
     shutil.rmtree(dst)
 
     results = pyrocopy.copy(src, dst, level=2)
-    assert results["filesCopied"] == 8, "level=2"
+    assert results.filesCopied == 8, "level=2"
     shutil.rmtree(dst)
 
     results = pyrocopy.copy(src, dst, level=-2)
-    assert results["filesCopied"] == 10, "level=-2"
+    assert results.filesCopied == 10, "level=-2"
     shutil.rmtree(dst)
 
 
@@ -366,7 +366,7 @@ def test_copy_file_includes(src_tree: dict) -> None:
     src = src_tree["src"]
     dst = src + "Copy"
     results = pyrocopy.copy(src, dst, includeFiles=["re:f[0-9]+"])
-    assert results["filesCopied"] == 15, "includeFiles f[0-9]+"
+    assert results.filesCopied == 15, "includeFiles f[0-9]+"
     for root, _dirs, files in os.walk(dst):
         for file in files:
             assert re.match(r"f[0-9]+", file), f"unexpected file not matching pattern: {file}"
@@ -376,7 +376,7 @@ def test_copy_file_excludes(src_tree: dict) -> None:
     src = src_tree["src"]
     dst = src + "Copy"
     results = pyrocopy.copy(src, dst, excludeFiles=["re:f[0-9]+"])
-    assert results["filesCopied"] == 9, "excludeFiles f[0-9]+"
+    assert results.filesCopied == 9, "excludeFiles f[0-9]+"
     for root, _dirs, files in os.walk(dst):
         for file in files:
             assert not re.match(r"f[0-9]+", file), f"excluded file found: {file}"
@@ -386,7 +386,7 @@ def test_copy_dir_includes(src_tree: dict) -> None:
     src = src_tree["src"]
     dst = src + "Copy"
     results = pyrocopy.copy(src, dst, includeDirs=["re:d[0-9]+"])
-    assert results["filesCopied"] == 17, "includeDirs d[0-9]+"
+    assert results.filesCopied == 17, "includeDirs d[0-9]+"
     for _root, dirs, _files in os.walk(dst):
         for d in dirs:
             assert d not in ("moredir", "dummydir"), f"unexpected directory: {d}"
@@ -396,7 +396,7 @@ def test_copy_dir_excludes(src_tree: dict) -> None:
     src = src_tree["src"]
     dst = src + "Copy"
     results = pyrocopy.copy(src, dst, excludeDirs=[os.path.join("*", "moredir")])
-    assert results["filesCopied"] == 19, "excludeDirs moredir"
+    assert results.filesCopied == 19, "excludeDirs moredir"
     for _root, dirs, _files in os.walk(dst):
         assert "moredir" not in dirs, "excluded directory 'moredir' found in output"
 
@@ -410,7 +410,7 @@ def test_move_basic(src_tree: dict) -> None:
     dst = src + "Moved"
 
     results = pyrocopy.move(src, dst)
-    assert results["filesMoved"] == 24, "move all: filesMoved"
+    assert results.filesMoved == 24, "move all: filesMoved"
     assert not os.path.exists(src) or not os.listdir(src), "src not cleaned up after move"
 
 
@@ -426,15 +426,15 @@ def test_move_depth_levels(src_tree: dict) -> None:
     pyrocopy.move(src, dst)
 
     results = pyrocopy.move(dst, src, level=1)
-    assert results["filesMoved"] == 6, "level=1"
+    assert results.filesMoved == 6, "level=1"
     assert os.path.exists(dst), "level=1 deleted whole dst tree"
 
     results = pyrocopy.move(dst, src, level=-1)
-    assert results["filesMoved"] == 12, "level=-1"
+    assert results.filesMoved == 12, "level=-1"
     assert os.path.exists(dst), "level=-1 deleted whole dst tree"
 
     results = pyrocopy.move(dst, src)
-    assert results["filesMoved"] == 6, "move remainder"
+    assert results.filesMoved == 6, "move remainder"
     assert not os.path.exists(dst), "dst not cleaned up after final move"
 
 
@@ -449,19 +449,19 @@ def test_move_dir_includes_excludes(src_tree: dict) -> None:
 
     # Include only dummydir — root files + dummydir subtree = 6+7 = 13 files
     results = pyrocopy.move(src, dst, includeDirs=["dummydir"], detailedResults=True)
-    assert results["filesMoved"] == 13, "move includeDirs=dummydir"
+    assert results.filesMoved == 13, "move includeDirs=dummydir"
     assert os.path.exists(src), "move with includeDirs deleted whole src tree"
 
     # src still has lvl1 (4 files) and lvl2 (7 files)
     exclude_lvl2 = [os.path.join("*", os.path.basename(lvl2))]
     results = pyrocopy.move(src, dst, excludeDirs=exclude_lvl2, detailedResults=True)
-    assert results["filesMoved"] == 4, "move excludeDirs=lvl2: filesMoved"
-    assert results["dirsSkipped"] == 1, "move excludeDirs=lvl2: dirsSkipped"
+    assert results.filesMoved == 4, "move excludeDirs=lvl2: filesMoved"
+    assert results.dirsSkipped == 1, "move excludeDirs=lvl2: dirsSkipped"
     assert os.path.exists(dst), "move with excludeDirs deleted whole dst tree"
 
     # Move the remaining 7 files in lvl2
     results = pyrocopy.move(src, dst)
-    assert results["filesMoved"] == 7, "move remainder after dir excludes"
+    assert results.filesMoved == 7, "move remainder after dir excludes"
     assert not os.path.exists(src), "src not cleaned up after final move"
 
 
@@ -478,14 +478,14 @@ def test_move_file_includes_excludes(src_tree: dict) -> None:
 
     # Move only f[0-9]+ files back (15 files, 9 skipped)
     results = pyrocopy.move(dst, src, includeFiles=["re:f[0-9]+"])
-    assert results["filesMoved"] == 15, "move includeFiles f[0-9]+: filesMoved"
-    assert results["filesSkipped"] == 9, "move includeFiles f[0-9]+: filesSkipped"
+    assert results.filesMoved == 15, "move includeFiles f[0-9]+: filesMoved"
+    assert results.filesSkipped == 9, "move includeFiles f[0-9]+: filesSkipped"
     assert os.path.exists(dst), "move with includeFiles deleted whole dst tree"
 
     # Move all except 'test' (8 files, 1 skipped)
     results = pyrocopy.move(dst, src, excludeFiles=["test"])
-    assert results["filesMoved"] == 8, "move excludeFiles=test: filesMoved"
-    assert results["filesSkipped"] == 1, "move excludeFiles=test: filesSkipped"
+    assert results.filesMoved == 8, "move excludeFiles=test: filesMoved"
+    assert results.filesSkipped == 1, "move excludeFiles=test: filesSkipped"
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +500,8 @@ def test_mirror_basic(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b)
-    assert results["filesCopied"] == 5 and results["dirsCopied"] == 3
-    assert results["filesRemoved"] == 3 and results["dirsRemoved"] == 2
+    assert results.filesCopied == 5 and results.dirsCopied == 3
+    assert results.filesRemoved == 3 and results.dirsRemoved == 2
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +516,7 @@ def test_mirror_depth_level_1(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, level=1)
-    assert results["filesCopied"] == 1 and results["filesRemoved"] == 1
+    assert results.filesCopied == 1 and results.filesRemoved == 1
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert not os.path.exists(os.path.join(mir_b, "fileB1"))
 
@@ -530,8 +530,8 @@ def test_mirror_depth_level_neg1(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, level=-1)
-    assert results["filesCopied"] == 1 and results["filesRemoved"] == 1
-    assert results["dirsCopied"] == 1 and results["dirsRemoved"] == 1
+    assert results.filesCopied == 1 and results.filesRemoved == 1
+    assert results.dirsCopied == 1 and results.dirsRemoved == 1
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a), "fileSubA21"))
     assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_b11, path_b), "fileSubB11"))
 
@@ -545,8 +545,8 @@ def test_mirror_depth_level_2(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, level=2, detailedResults=True)
-    assert results["filesCopied"] == 4 and results["filesRemoved"] == 2
-    assert results["dirsCopied"] == 2 and results["dirsRemoved"] == 0
+    assert results.filesCopied == 4 and results.filesRemoved == 2
+    assert results.dirsCopied == 2 and results.dirsRemoved == 0
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
@@ -566,8 +566,8 @@ def test_mirror_depth_level_neg2(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, level=-2, detailedResults=True)
-    assert results["filesCopied"] == 4 and results["filesRemoved"] == 2
-    assert results["dirsCopied"] == 3 and results["dirsRemoved"] == 2
+    assert results.filesCopied == 4 and results.filesRemoved == 2
+    assert results.dirsCopied == 3 and results.dirsRemoved == 2
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a), "fileSubA2"))
@@ -589,8 +589,8 @@ def test_mirror_file_includes(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, includeFiles=["*A1*"], detailedResults=True)
-    assert results["filesCopied"] == 3 and results["filesSkipped"] == 2
-    assert results["filesRemoved"] == 3 and results["dirsRemoved"] == 2
+    assert results.filesCopied == 3 and results.filesSkipped == 2
+    assert results.filesRemoved == 3 and results.dirsRemoved == 2
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
@@ -608,7 +608,7 @@ def test_mirror_file_excludes(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, excludeFiles=["fileA1*", "fileSubA1*"], detailedResults=True)
-    assert results["filesCopied"] == 2 and results["filesSkipped"] == 3
+    assert results.filesCopied == 2 and results.filesSkipped == 3
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a), "fileSubA2"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a), "fileSubA21"))
     assert not os.path.exists(os.path.join(mir_b, "fileB1"))
@@ -629,8 +629,8 @@ def test_mirror_dir_includes(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, mir_b)
 
     results = pyrocopy.mirror(mir_a, mir_b, includeDirs=["subA1"], detailedResults=True)
-    assert results["filesCopied"] == 3 and results["dirsSkipped"] == 2
-    assert results["filesRemoved"] == 3 and results["dirsRemoved"] == 2
+    assert results.filesCopied == 3 and results.dirsSkipped == 2
+    assert results.filesRemoved == 3 and results.dirsRemoved == 2
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
@@ -652,8 +652,8 @@ def test_mirror_dir_excludes(mirror_data: dict) -> None:
     results = pyrocopy.mirror(
         mir_a, mir_b, excludeDirs=[os.path.join("*", "subSubA1")], detailedResults=True
     )
-    assert results["filesCopied"] == 4 and results["dirsSkipped"] == 1
-    assert results["filesRemoved"] == 3 and results["dirsRemoved"] == 2
+    assert results.filesCopied == 4 and results.dirsSkipped == 1
+    assert results.filesRemoved == 3 and results.dirsRemoved == 2
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
@@ -676,11 +676,11 @@ def test_sync_basic(mirror_data: dict) -> None:
     pyrocopy.copy(path_b, sync_b)
 
     results = pyrocopy.sync(sync_a, sync_b, preserveStats=True)
-    assert results["filesCopied"] == 8 and results["dirsCopied"] == 5
+    assert results.filesCopied == 8 and results.dirsCopied == 5
     # The second copy direction (syncB→syncA) encounters the 5 pathA files already in
     # syncA with identical mtimes and skips them; these are counted in the merged result.
-    assert results["filesSkipped"] == 5 and results["dirsSkipped"] == 0
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
+    assert results.filesSkipped == 5 and results.dirsSkipped == 0
+    assert results.filesFailed == 0 and results.dirsFailed == 0
 
 
 def test_sync_with_pre_existing_files(mirror_data: dict) -> None:
@@ -695,10 +695,10 @@ def test_sync_with_pre_existing_files(mirror_data: dict) -> None:
     pyrocopy.copy(os.path.join(sync_b, "fileB1"), os.path.join(sync_a, "fileB1"))
 
     results = pyrocopy.sync(sync_a, sync_b, preserveStats=True, detailedResults=True)
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
-    assert results["filesCopied"] == 6 and results["dirsCopied"] == 5
+    assert results.filesFailed == 0 and results.dirsFailed == 0
+    assert results.filesCopied == 6 and results.dirsCopied == 5
     # The two pre-seeded files plus all 4 pathA files are skipped in the B→A direction.
-    assert results["filesSkipped"] == 6 and results["dirsSkipped"] == 0
+    assert results.filesSkipped == 6 and results.dirsSkipped == 0
 
 
 def test_sync_with_one_pre_existing_file(mirror_data: dict) -> None:
@@ -716,7 +716,7 @@ def test_sync_with_one_pre_existing_file(mirror_data: dict) -> None:
     )
 
     results = pyrocopy.sync(sync_a, sync_b, preserveStats=True, detailedResults=True)
-    assert results["filesFailed"] == 0 and results["dirsFailed"] == 0
-    assert results["filesCopied"] == 7 and results["dirsCopied"] == 5
+    assert results.filesFailed == 0 and results.dirsFailed == 0
+    assert results.filesCopied == 7 and results.dirsCopied == 5
     # fileSubB11 plus the 5 pathA files are skipped in the B→A direction.
-    assert results["filesSkipped"] == 6 and results["dirsSkipped"] == 0
+    assert results.filesSkipped == 6 and results.dirsSkipped == 0

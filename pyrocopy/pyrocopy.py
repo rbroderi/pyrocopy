@@ -32,7 +32,7 @@ import os
 import re
 import stat
 import sys
-from typing import TypedDict, cast
+from dataclasses import asdict, dataclass
 
 __version__: tuple[int, int, int] = (0, 8, 0)
 __version_str__: str = ".".join(str(v) for v in __version__)
@@ -48,66 +48,106 @@ _Pattern = str | re.Pattern[str]
 
 
 # ---------------------------------------------------------------------------
-# Result TypedDicts
+# Result dataclasses
 # ---------------------------------------------------------------------------
 
 
-class _CopyCounters(TypedDict):
+@dataclass(slots=True)
+class _CopyState:
+    """Mutable accumulator used internally by :func:`copy`."""
+
+    filesCopied: int = 0
+    filesFailed: int = 0
+    filesSkipped: int = 0
+    dirsCopied: int = 0
+    dirsFailed: int = 0
+    dirsSkipped: int = 0
+    filesCopiedList: list[str] | None = None
+    filesFailedList: list[str] | None = None
+    filesSkippedList: list[str] | None = None
+    dirsCopiedList: list[str] | None = None
+    dirsFailedList: list[str] | None = None
+    dirsSkippedList: list[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CopyResults:
+    """Results returned by :func:`copy` and :func:`sync`."""
+
     filesCopied: int
     filesFailed: int
     filesSkipped: int
     dirsCopied: int
     dirsFailed: int
     dirsSkipped: int
+    filesCopiedList: list[str] | None = None
+    filesFailedList: list[str] | None = None
+    filesSkippedList: list[str] | None = None
+    dirsCopiedList: list[str] | None = None
+    dirsFailedList: list[str] | None = None
+    dirsSkippedList: list[str] | None = None
 
 
-class _CopyLists(TypedDict, total=False):
-    filesCopiedList: list[str]
-    filesFailedList: list[str]
-    filesSkippedList: list[str]
-    dirsCopiedList: list[str]
-    dirsFailedList: list[str]
-    dirsSkippedList: list[str]
+@dataclass(slots=True)
+class _MirrorState:
+    """Mutable accumulator used internally by :func:`mirror`."""
+
+    filesCopied: int = 0
+    filesFailed: int = 0
+    filesSkipped: int = 0
+    dirsCopied: int = 0
+    dirsFailed: int = 0
+    dirsSkipped: int = 0
+    filesRemoved: int = 0
+    dirsRemoved: int = 0
+    filesCopiedList: list[str] | None = None
+    filesFailedList: list[str] | None = None
+    filesSkippedList: list[str] | None = None
+    dirsCopiedList: list[str] | None = None
+    dirsFailedList: list[str] | None = None
+    dirsSkippedList: list[str] | None = None
+    filesRemovedList: list[str] | None = None
+    dirsRemovedList: list[str] | None = None
 
 
-class CopyResults(_CopyCounters, _CopyLists):
-    """Results returned by :func:`copy` and :func:`sync`."""
-
-
-class _MirrorRequiredExtras(TypedDict):
-    filesRemoved: int
-    dirsRemoved: int
-
-
-class _MirrorOptionalExtras(TypedDict, total=False):
-    filesRemovedList: list[str]
-    dirsRemovedList: list[str]
-
-
-class MirrorResults(CopyResults, _MirrorRequiredExtras, _MirrorOptionalExtras):
+@dataclass(frozen=True, slots=True)
+class MirrorResults:
     """Results returned by :func:`mirror`."""
 
+    filesCopied: int
+    filesFailed: int
+    filesSkipped: int
+    dirsCopied: int
+    dirsFailed: int
+    dirsSkipped: int
+    filesRemoved: int
+    dirsRemoved: int
+    filesCopiedList: list[str] | None = None
+    filesFailedList: list[str] | None = None
+    filesSkippedList: list[str] | None = None
+    dirsCopiedList: list[str] | None = None
+    dirsFailedList: list[str] | None = None
+    dirsSkippedList: list[str] | None = None
+    filesRemovedList: list[str] | None = None
+    dirsRemovedList: list[str] | None = None
 
-class _MoveCounters(TypedDict):
+
+@dataclass(frozen=True, slots=True)
+class MoveResults:
+    """Results returned by :func:`move`."""
+
     filesMoved: int
     filesFailed: int
     filesSkipped: int
     dirsMoved: int
     dirsFailed: int
     dirsSkipped: int
-
-
-class _MoveLists(TypedDict, total=False):
-    filesMovedList: list[str]
-    filesFailedList: list[str]
-    filesSkippedList: list[str]
-    dirsMovedList: list[str]
-    dirsFailedList: list[str]
-    dirsSkippedList: list[str]
-
-
-class MoveResults(_MoveCounters, _MoveLists):
-    """Results returned by :func:`move`."""
+    filesMovedList: list[str] | None = None
+    filesFailedList: list[str] | None = None
+    filesSkippedList: list[str] | None = None
+    dirsMovedList: list[str] | None = None
+    dirsFailedList: list[str] | None = None
+    dirsSkippedList: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -135,37 +175,30 @@ def _compile_patterns(patterns: list[str] | None) -> list[_Pattern]:
     return compiled
 
 
-def _init_copy_results(detailed: bool) -> CopyResults:
-    """Return a zero-initialized :class:`CopyResults`, adding list fields when *detailed* is True."""
-    results: CopyResults = {
-        "filesCopied": 0,
-        "filesFailed": 0,
-        "filesSkipped": 0,
-        "dirsCopied": 0,
-        "dirsFailed": 0,
-        "dirsSkipped": 0,
-    }
+def _init_copy_state(detailed: bool) -> _CopyState:
+    """Return a zero-initialized :class:`_CopyState`, populating list fields when *detailed* is True."""
+    state = _CopyState()
     if detailed:
-        results["filesCopiedList"] = []
-        results["filesFailedList"] = []
-        results["filesSkippedList"] = []
-        results["dirsCopiedList"] = []
-        results["dirsFailedList"] = []
-        results["dirsSkippedList"] = []
-    return results
+        state.filesCopiedList = []
+        state.filesFailedList = []
+        state.filesSkippedList = []
+        state.dirsCopiedList = []
+        state.dirsFailedList = []
+        state.dirsSkippedList = []
+    return state
 
 
 def _record_file_result(
-    results: CopyResults,
+    state: _CopyState,
     result: int,
     src_path: str,
     dst_path: str,
     detailed: bool,
 ) -> None:
-    """Update *results* in-place from the outcome code of a file copy.
+    """Update *state* in-place from the outcome code of a file copy.
 
     Args:
-        results: Mutable results dict to update.
+        state: Mutable state object to update.
         result: 1 = copied, 0 = skipped, negative = error.
         src_path: Source path used for logging and list tracking.
         dst_path: Destination path used for logging.
@@ -173,19 +206,19 @@ def _record_file_result(
     """
     if result == 1:
         logger.info("Copied: %s => %s", src_path, dst_path)
-        results["filesCopied"] += 1
+        state.filesCopied += 1
         if detailed:
-            results["filesCopiedList"].append(src_path)  # type: ignore[union-attr]
+            state.filesCopiedList.append(src_path)  # type: ignore[union-attr]
     elif result == 0:
         logger.info("Skipped: %s", src_path)
-        results["filesSkipped"] += 1
+        state.filesSkipped += 1
         if detailed:
-            results["filesSkippedList"].append(src_path)  # type: ignore[union-attr]
+            state.filesSkippedList.append(src_path)  # type: ignore[union-attr]
     else:
         logger.error("Failed: %s => %s", src_path, dst_path)
-        results["filesFailed"] += 1
+        state.filesFailed += 1
         if detailed:
-            results["filesFailedList"].append(src_path)  # type: ignore[union-attr]
+            state.filesFailedList.append(src_path)  # type: ignore[union-attr]
 
 
 def _merge_unique(base: list[str], additions: list[str]) -> list[str]:
@@ -222,12 +255,12 @@ def copy(
         detailedResults: Populate per-item list fields in the returned dict.
 
     Returns:
-        A :class:`CopyResults` dict with copy statistics.
+        A :class:`CopyResults` dataclass with copy statistics.
     """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
 
-    results = _init_copy_results(detailedResults)
+    state = _init_copy_state(detailedResults)
     include_file_patterns = _compile_patterns(includeFiles)
     include_dir_patterns = _compile_patterns(includeDirs)
     exclude_file_patterns = _compile_patterns(excludeFiles)
@@ -235,20 +268,20 @@ def copy(
 
     if _isSamePath(src, dst):
         logger.error("Cannot perform a copy to the same location.")
-        results["dirsFailed"] += 1
-        return results
+        state.dirsFailed += 1
+        return CopyResults(**asdict(state))
 
     if os.path.isfile(src) or (not followLinks and os.path.islink(src)):
         if os.path.isdir(dst):
             dst = os.path.join(dst, os.path.basename(src))
         result = _copyFile(src, dst, include_file_patterns, exclude_file_patterns, forceOverwrite=forceOverwrite)
-        _record_file_result(results, result, src, dst, detailedResults)
-        return results
+        _record_file_result(state, result, src, dst, detailedResults)
+        return CopyResults(**asdict(state))
 
     if not os.path.isdir(src):
         logger.error("Source path is not valid: %s", src)
-        results["filesFailed"] += 1
-        return results
+        state.filesFailed += 1
+        return CopyResults(**asdict(state))
 
     if not os.path.isdir(dst):
         mkdir(dst)
@@ -263,9 +296,9 @@ def copy(
 
         if os.path.islink(root) and not followLinks:
             logger.info("Skipped: %s", rel_root)
-            results["dirsSkipped"] += 1
+            state.dirsSkipped += 1
             if detailedResults:
-                results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+                state.dirsSkippedList.append(rel_root)  # type: ignore[union-attr]
             continue
 
         if level != 0:
@@ -274,16 +307,16 @@ def copy(
                 depth = max_depth - depth
             if depth >= abs(level):
                 logger.info("Skipped: %s", rel_root)
-                results["dirsSkipped"] += 1
+                state.dirsSkipped += 1
                 if detailedResults:
-                    results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+                    state.dirsSkippedList.append(rel_root)  # type: ignore[union-attr]
                 continue
 
         if rel_root != "." and not _checkShouldCopy(rel_root, False, include_dir_patterns, exclude_dir_patterns):
             logger.info("Skipped: %s", rel_root)
-            results["dirsSkipped"] += 1
+            state.dirsSkipped += 1
             if detailedResults:
-                results["dirsSkippedList"].append(rel_root)  # type: ignore[union-attr]
+                state.dirsSkippedList.append(rel_root)  # type: ignore[union-attr]
             continue
 
         dst_root = dst if rel_root == "." else os.path.join(dst, rel_root)
@@ -292,14 +325,14 @@ def copy(
 
         if rel_root != ".":
             if os.path.isdir(dst_root):
-                results["dirsCopied"] += 1
+                state.dirsCopied += 1
                 if detailedResults:
-                    results["dirsCopiedList"].append(rel_root)  # type: ignore[union-attr]
+                    state.dirsCopiedList.append(rel_root)  # type: ignore[union-attr]
             else:
                 logger.exception("Failed: %s", rel_root)
-                results["dirsFailed"] += 1
+                state.dirsFailed += 1
                 if detailedResults:
-                    results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
+                    state.dirsFailedList.append(rel_root)  # type: ignore[union-attr]
                 continue
 
         for file in files:
@@ -313,9 +346,9 @@ def copy(
                 forceOverwrite=forceOverwrite,
                 preserveStats=preserveStats,
             )
-            _record_file_result(results, result, file_path, dst_full, detailedResults)
+            _record_file_result(state, result, file_path, dst_full, detailedResults)
 
-    return results
+    return CopyResults(**asdict(state))
 
 
 def mkdir(path: str) -> bool:
@@ -371,7 +404,7 @@ def mirror(
         detailedResults: Populate per-item list fields in the returned dict.
 
     Returns:
-        A :class:`MirrorResults` dict with copy and removal statistics.
+        A :class:`MirrorResults` dataclass with copy and removal statistics.
     """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
@@ -385,26 +418,39 @@ def mirror(
         detailedResults=True,
     )
 
-    results: MirrorResults = cast(MirrorResults, copy_results)
-    results["filesRemoved"] = 0
-    results["dirsRemoved"] = 0
-    if detailedResults:
-        results["filesRemovedList"] = []
-        results["dirsRemovedList"] = []
+    # Build a mutable mirror state seeded from the copy results.
+    state = _MirrorState(
+        filesCopied=copy_results.filesCopied,
+        filesFailed=copy_results.filesFailed,
+        filesSkipped=copy_results.filesSkipped,
+        dirsCopied=copy_results.dirsCopied,
+        dirsFailed=copy_results.dirsFailed,
+        dirsSkipped=copy_results.dirsSkipped,
+        filesRemoved=0,
+        dirsRemoved=0,
+        filesCopiedList=list(copy_results.filesCopiedList or []),
+        filesFailedList=list(copy_results.filesFailedList or []),
+        filesSkippedList=list(copy_results.filesSkippedList or []),
+        dirsCopiedList=list(copy_results.dirsCopiedList or []),
+        dirsFailedList=list(copy_results.dirsFailedList or []),
+        dirsSkippedList=list(copy_results.dirsSkippedList or []),
+        filesRemovedList=[] if detailedResults else None,
+        dirsRemovedList=[] if detailedResults else None,
+    )
 
     # Keep excluded items from being deleted during the removal pass.
     if excludeDirs:
-        results["dirsSkippedList"].extend(excludeDirs)  # type: ignore[union-attr]
+        state.dirsSkippedList.extend(excludeDirs)  # type: ignore[union-attr]
     if excludeFiles:
-        results["filesSkippedList"].extend(excludeFiles)  # type: ignore[union-attr]
+        state.filesSkippedList.extend(excludeFiles)  # type: ignore[union-attr]
 
     max_depth = _getTreeDepth(src)
 
     # Build lookup sets once for O(1) membership tests during the removal walk.
-    skipped_dirs: set[str] = set(results.get("dirsSkippedList") or [])
-    failed_dirs: set[str] = set(results.get("dirsFailedList") or [])
-    skipped_files: set[str] = set(results.get("filesSkippedList") or [])
-    failed_files: set[str] = set(results.get("filesFailedList") or [])
+    skipped_dirs: set[str] = set(state.dirsSkippedList or [])
+    failed_dirs: set[str] = set(state.dirsFailedList or [])
+    skipped_files: set[str] = set(state.filesSkippedList or [])
+    failed_files: set[str] = set(state.filesFailedList or [])
 
     for root, dirs, files in os.walk(dst, topdown=False, followlinks=followLinks):
         rel_root = os.path.relpath(root, dst)
@@ -427,34 +473,46 @@ def mirror(
             if not os.path.exists(os.path.join(src, rel_file_path)):
                 try:
                     os.remove(file_path)
-                    results["filesRemoved"] += 1
+                    state.filesRemoved += 1
                     if detailedResults:
-                        results["filesRemovedList"].append(rel_file_path)  # type: ignore[union-attr]
+                        state.filesRemovedList.append(rel_file_path)  # type: ignore[union-attr]
                 except OSError:
-                    results["filesFailedList"].append(rel_file_path)  # type: ignore[union-attr]
+                    state.filesFailedList.append(rel_file_path)  # type: ignore[union-attr]
 
         if not os.path.exists(os.path.join(src, rel_root)):
             if not os.listdir(root):
                 try:
                     os.rmdir(root)
-                    results["dirsRemoved"] += 1
+                    state.dirsRemoved += 1
                     if detailedResults:
-                        results["dirsRemovedList"].append(rel_root)  # type: ignore[union-attr]
+                        state.dirsRemovedList.append(rel_root)  # type: ignore[union-attr]
                 except OSError:
-                    results["dirsFailed"] += 1
+                    state.dirsFailed += 1
                     if detailedResults:
-                        results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
+                        state.dirsFailedList.append(rel_root)  # type: ignore[union-attr]
             else:
-                results["dirsFailed"] += 1
+                state.dirsFailed += 1
                 if detailedResults:
-                    results["dirsFailedList"].append(rel_root)  # type: ignore[union-attr]
+                    state.dirsFailedList.append(rel_root)  # type: ignore[union-attr]
 
-    if not detailedResults:
-        for key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
-                    "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
-            results.pop(key, None)  # type: ignore[misc]
-
-    return results
+    return MirrorResults(
+        filesCopied=state.filesCopied,
+        filesFailed=state.filesFailed,
+        filesSkipped=state.filesSkipped,
+        dirsCopied=state.dirsCopied,
+        dirsFailed=state.dirsFailed,
+        dirsSkipped=state.dirsSkipped,
+        filesRemoved=state.filesRemoved,
+        dirsRemoved=state.dirsRemoved,
+        filesCopiedList=state.filesCopiedList if detailedResults else None,
+        filesFailedList=state.filesFailedList if detailedResults else None,
+        filesSkippedList=state.filesSkippedList if detailedResults else None,
+        dirsCopiedList=state.dirsCopiedList if detailedResults else None,
+        dirsFailedList=state.dirsFailedList if detailedResults else None,
+        dirsSkippedList=state.dirsSkippedList if detailedResults else None,
+        filesRemovedList=state.filesRemovedList if detailedResults else None,
+        dirsRemovedList=state.dirsRemovedList if detailedResults else None,
+    )
 
 
 def move(
@@ -486,7 +544,7 @@ def move(
         detailedResults: Populate per-item list fields in the returned dict.
 
     Returns:
-        A :class:`MoveResults` dict with move statistics.
+        A :class:`MoveResults` dataclass with move statistics.
     """
     src = os.path.abspath(src)
     dst = os.path.abspath(dst)
@@ -501,10 +559,13 @@ def move(
     )
 
     # Build case-insensitive lookup sets for the source-deletion walk.
-    failed_dirs_lower = {d.lower() for d in copy_results["dirsFailedList"]}   # type: ignore[union-attr]
-    skipped_dirs_lower = {d.lower() for d in copy_results["dirsSkippedList"]} # type: ignore[union-attr]
-    failed_files_lower = {f.lower() for f in copy_results["filesFailedList"]} # type: ignore[union-attr]
-    skipped_files_lower = {f.lower() for f in copy_results["filesSkippedList"]}  # type: ignore[union-attr]
+    failed_dirs_lower = {d.lower() for d in (copy_results.dirsFailedList or [])}
+    skipped_dirs_lower = {d.lower() for d in (copy_results.dirsSkippedList or [])}
+    failed_files_lower = {f.lower() for f in (copy_results.filesFailedList or [])}
+    skipped_files_lower = {f.lower() for f in (copy_results.filesSkippedList or [])}
+
+    extra_failed_files: list[str] = []
+    extra_dirs_failed: int = 0
 
     for root, dirs, files in os.walk(src, topdown=False):
         rel_root = os.path.relpath(root, src)
@@ -522,7 +583,7 @@ def move(
             try:
                 os.remove(file_path)
             except OSError:
-                copy_results["filesFailedList"].append(rel_file_path)  # type: ignore[union-attr]
+                extra_failed_files.append(rel_file_path)
 
         if not os.listdir(root):
             if os.path.islink(root):
@@ -531,25 +592,24 @@ def move(
                 try:
                     os.rmdir(root)
                 except OSError:
-                    copy_results["dirsFailed"] += 1
+                    extra_dirs_failed += 1
 
-    results: MoveResults = {
-        "filesMoved": copy_results["filesCopied"],
-        "filesFailed": copy_results["filesFailed"],
-        "filesSkipped": copy_results["filesSkipped"],
-        "dirsMoved": copy_results["dirsCopied"],
-        "dirsFailed": copy_results["dirsFailed"],
-        "dirsSkipped": copy_results["dirsSkipped"],
-    }
-    if detailedResults:
-        results["filesMovedList"] = copy_results["filesCopiedList"]   # type: ignore[union-attr]
-        results["filesFailedList"] = copy_results["filesFailedList"]  # type: ignore[union-attr]
-        results["filesSkippedList"] = copy_results["filesSkippedList"]  # type: ignore[union-attr]
-        results["dirsMovedList"] = copy_results["dirsCopiedList"]     # type: ignore[union-attr]
-        results["dirsFailedList"] = copy_results["dirsFailedList"]    # type: ignore[union-attr]
-        results["dirsSkippedList"] = copy_results["dirsSkippedList"]  # type: ignore[union-attr]
+    all_failed_files = list(copy_results.filesFailedList or []) + extra_failed_files
 
-    return results
+    return MoveResults(
+        filesMoved=copy_results.filesCopied,
+        filesFailed=copy_results.filesFailed + len(extra_failed_files),
+        filesSkipped=copy_results.filesSkipped,
+        dirsMoved=copy_results.dirsCopied,
+        dirsFailed=copy_results.dirsFailed + extra_dirs_failed,
+        dirsSkipped=copy_results.dirsSkipped,
+        filesMovedList=copy_results.filesCopiedList if detailedResults else None,
+        filesFailedList=all_failed_files if detailedResults else None,
+        filesSkippedList=copy_results.filesSkippedList if detailedResults else None,
+        dirsMovedList=copy_results.dirsCopiedList if detailedResults else None,
+        dirsFailedList=copy_results.dirsFailedList if detailedResults else None,
+        dirsSkippedList=copy_results.dirsSkippedList if detailedResults else None,
+    )
 
 
 def sync(
@@ -583,12 +643,12 @@ def sync(
         detailedResults: Populate per-item list fields in the returned dict.
 
     Returns:
-        A :class:`CopyResults` dict with combined statistics from both directions.
+        A :class:`CopyResults` dataclass with combined statistics from both directions.
     """
     path1 = os.path.abspath(path1)
     path2 = os.path.abspath(path2)
 
-    results = copy(
+    results1 = copy(
         path1, path2,
         includeFiles=includeFiles, includeDirs=includeDirs,
         excludeFiles=excludeDirs,  # NOTE: preserving original behaviour
@@ -606,26 +666,27 @@ def sync(
     )
 
     # Merge results from both directions, avoiding duplicates.
-    for list_key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
-                     "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
-        results[list_key] = _merge_unique(  # type: ignore[literal-required]
-            results[list_key],   # type: ignore[literal-required]
-            results2[list_key],  # type: ignore[literal-required]
-        )
+    merged_files_copied = _merge_unique(list(results1.filesCopiedList or []), list(results2.filesCopiedList or []))
+    merged_files_failed = _merge_unique(list(results1.filesFailedList or []), list(results2.filesFailedList or []))
+    merged_files_skipped = _merge_unique(list(results1.filesSkippedList or []), list(results2.filesSkippedList or []))
+    merged_dirs_copied = _merge_unique(list(results1.dirsCopiedList or []), list(results2.dirsCopiedList or []))
+    merged_dirs_failed = _merge_unique(list(results1.dirsFailedList or []), list(results2.dirsFailedList or []))
+    merged_dirs_skipped = _merge_unique(list(results1.dirsSkippedList or []), list(results2.dirsSkippedList or []))
 
-    results["filesCopied"] = len(results["filesCopiedList"])   # type: ignore[arg-type]
-    results["filesFailed"] = len(results["filesFailedList"])   # type: ignore[arg-type]
-    results["filesSkipped"] = len(results["filesSkippedList"]) # type: ignore[arg-type]
-    results["dirsCopied"] = len(results["dirsCopiedList"])     # type: ignore[arg-type]
-    results["dirsFailed"] = len(results["dirsFailedList"])     # type: ignore[arg-type]
-    results["dirsSkipped"] = len(results["dirsSkippedList"])   # type: ignore[arg-type]
-
-    if not detailedResults:
-        for key in ("filesCopiedList", "filesFailedList", "filesSkippedList",
-                    "dirsCopiedList", "dirsFailedList", "dirsSkippedList"):
-            results.pop(key, None)  # type: ignore[misc]
-
-    return results
+    return CopyResults(
+        filesCopied=len(merged_files_copied),
+        filesFailed=len(merged_files_failed),
+        filesSkipped=len(merged_files_skipped),
+        dirsCopied=len(merged_dirs_copied),
+        dirsFailed=len(merged_dirs_failed),
+        dirsSkipped=len(merged_dirs_skipped),
+        filesCopiedList=merged_files_copied if detailedResults else None,
+        filesFailedList=merged_files_failed if detailedResults else None,
+        filesSkippedList=merged_files_skipped if detailedResults else None,
+        dirsCopiedList=merged_dirs_copied if detailedResults else None,
+        dirsFailedList=merged_dirs_failed if detailedResults else None,
+        dirsSkippedList=merged_dirs_skipped if detailedResults else None,
+    )
 
 
 def _isSamePath(src: str, dst: str) -> bool:
@@ -867,20 +928,20 @@ def _displayCopyResults(results: CopyResults | MirrorResults | MoveResults) -> N
 
     logger.info("--------------------")
     logger.info("Files:")
-    if "filesCopied" in results:
-        logger.info("\tCopied: %d", results["filesCopied"])  # type: ignore[typeddict-item]
-    if "filesMoved" in results:
-        logger.info("\tMoved: %d", results["filesMoved"])  # type: ignore[typeddict-item]
-    logger.info("\tSkipped: %d", results["filesSkipped"])
-    logger.info("\tFailed: %d", results["filesFailed"])
+    if hasattr(results, "filesCopied"):
+        logger.info("\tCopied: %d", results.filesCopied)  # type: ignore[union-attr]
+    if hasattr(results, "filesMoved"):
+        logger.info("\tMoved: %d", results.filesMoved)  # type: ignore[union-attr]
+    logger.info("\tSkipped: %d", results.filesSkipped)
+    logger.info("\tFailed: %d", results.filesFailed)
     logger.info("")
     logger.info("Directories:")
-    if "dirsCopied" in results:
-        logger.info("\tCopied: %d", results["dirsCopied"])  # type: ignore[typeddict-item]
-    if "dirsMoved" in results:
-        logger.info("\tMoved: %d", results["dirsMoved"])  # type: ignore[typeddict-item]
-    logger.info("\tSkipped: %d", results["dirsSkipped"])
-    logger.info("\tFailed: %d", results["dirsFailed"])
+    if hasattr(results, "dirsCopied"):
+        logger.info("\tCopied: %d", results.dirsCopied)  # type: ignore[union-attr]
+    if hasattr(results, "dirsMoved"):
+        logger.info("\tMoved: %d", results.dirsMoved)  # type: ignore[union-attr]
+    logger.info("\tSkipped: %d", results.dirsSkipped)
+    logger.info("\tFailed: %d", results.dirsFailed)
     logger.info("--------------------")
 
 
