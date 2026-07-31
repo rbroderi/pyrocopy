@@ -33,10 +33,246 @@ import re
 import stat
 import sys
 
+# Python 3.7 removed re._pattern_type; use re.Pattern when available.
+_re_pattern_type = getattr(re, 'Pattern', getattr(re, '_pattern_type', type(re.compile(''))))
+
 '''
 The version of this script as an int tuple (major, minor, patch).
 '''
 __version__ = (0, 8, 0)
+
+# ---------------------------------------------------------------------------
+# Windows-specific fast directory scanning
+#
+# On Windows, FindFirstFileExW with FindExInfoBasic and FIND_FIRST_EX_LARGE_FETCH
+# skips the expensive short (8.3) filename lookup and requests a larger kernel
+# buffer, significantly reducing the number of system calls needed to enumerate
+# large directories.  On all other platforms we fall back to the standard
+# os.scandir / os.walk machinery.
+# ---------------------------------------------------------------------------
+
+if sys.platform == 'win32':
+    import ctypes
+    import ctypes.wintypes
+
+    _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    # Win32 constants
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _ERROR_NO_MORE_FILES = 18
+    _FIND_FIRST_EX_LARGE_FETCH = 2       # dwAdditionalFlags: use a larger buffer
+    _FindExInfoBasic = 1                 # fInfoLevelId: skip the 8.3 alt name
+    _FindExSearchNameMatch = 0           # fSearchOp: normal name matching
+    _FILE_ATTRIBUTE_DIRECTORY = 0x10
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    # 100-nanosecond intervals between 1601-01-01 (FILETIME epoch) and
+    # 1970-01-01 (Unix epoch).
+    _FILETIME_EPOCH_DELTA = 116444736000000000
+
+    class _FILETIME(ctypes.Structure):
+        _fields_ = [
+            ('dwLowDateTime', ctypes.wintypes.DWORD),
+            ('dwHighDateTime', ctypes.wintypes.DWORD),
+        ]
+
+        def to_timestamp(self):
+            ft = (self.dwHighDateTime << 32) | self.dwLowDateTime
+            return (ft - _FILETIME_EPOCH_DELTA) / 1e7
+
+    class _WIN32_FIND_DATAW(ctypes.Structure):
+        _fields_ = [
+            ('dwFileAttributes', ctypes.wintypes.DWORD),
+            ('ftCreationTime', _FILETIME),
+            ('ftLastAccessTime', _FILETIME),
+            ('ftLastWriteTime', _FILETIME),
+            ('nFileSizeHigh', ctypes.wintypes.DWORD),
+            ('nFileSizeLow', ctypes.wintypes.DWORD),
+            ('dwReserved0', ctypes.wintypes.DWORD),
+            ('dwReserved1', ctypes.wintypes.DWORD),
+            ('cFileName', ctypes.c_wchar * 260),
+            ('cAlternateFileName', ctypes.c_wchar * 14),
+        ]
+
+    _kernel32.FindFirstFileExW.restype = ctypes.wintypes.HANDLE
+    _kernel32.FindFirstFileExW.argtypes = [
+        ctypes.wintypes.LPCWSTR,   # lpFileName
+        ctypes.c_int,              # fInfoLevelId
+        ctypes.c_void_p,           # lpFindFileData
+        ctypes.c_int,              # fSearchOp
+        ctypes.c_void_p,           # lpSearchFilter (reserved, must be NULL)
+        ctypes.wintypes.DWORD,     # dwAdditionalFlags
+    ]
+    _kernel32.FindNextFileW.restype = ctypes.wintypes.BOOL
+    _kernel32.FindNextFileW.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_void_p]
+    _kernel32.FindClose.restype = ctypes.wintypes.BOOL
+    _kernel32.FindClose.argtypes = [ctypes.wintypes.HANDLE]
+
+    class _WinStatResult:
+        '''Minimal os.stat_result-compatible object built directly from WIN32_FIND_DATAW.
+
+        Avoids an extra GetFileInformationByHandle / NtQueryInformationFile
+        round-trip because FindFirstFileExW already returns the timestamps and
+        file size inline.
+        '''
+        __slots__ = ('st_mode', 'st_size', 'st_mtime', 'st_atime', 'st_ctime',
+                     'st_ino', 'st_dev', 'st_nlink', 'st_uid', 'st_gid')
+
+        def __init__(self, find_data):
+            attrs = find_data.dwFileAttributes
+            if attrs & _FILE_ATTRIBUTE_DIRECTORY:
+                self.st_mode = stat.S_IFDIR | 0o777
+            else:
+                self.st_mode = stat.S_IFREG | 0o666
+            self.st_size = (find_data.nFileSizeHigh << 32) | find_data.nFileSizeLow
+            self.st_mtime = find_data.ftLastWriteTime.to_timestamp()
+            self.st_atime = find_data.ftLastAccessTime.to_timestamp()
+            self.st_ctime = find_data.ftCreationTime.to_timestamp()
+            self.st_ino = 0
+            self.st_dev = 0
+            self.st_nlink = 1
+            self.st_uid = 0
+            self.st_gid = 0
+
+    class _WinDirEntry:
+        '''os.DirEntry-compatible object backed by WIN32_FIND_DATAW data.
+
+        The stat information is available for free (it was returned as part of
+        the directory enumeration) so .stat() never issues an additional
+        syscall for regular files and directories.
+        '''
+        __slots__ = ('name', 'path', '_attrs', '_stat_cache', '_lstat_cache')
+
+        def __init__(self, parent_path, name, find_data):
+            self.name = name
+            self.path = os.path.join(parent_path, name)
+            self._attrs = find_data.dwFileAttributes
+            self._lstat_cache = _WinStatResult(find_data)
+            self._stat_cache = None  # populated lazily for symlinks
+
+        def is_dir(self, follow_symlinks=True):
+            if follow_symlinks and self._attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+                try:
+                    return os.path.isdir(self.path)
+                except OSError:
+                    return False
+            return bool(self._attrs & _FILE_ATTRIBUTE_DIRECTORY)
+
+        def is_file(self, follow_symlinks=True):
+            if follow_symlinks and self._attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+                try:
+                    return os.path.isfile(self.path)
+                except OSError:
+                    return False
+            return not bool(self._attrs & _FILE_ATTRIBUTE_DIRECTORY)
+
+        def is_symlink(self):
+            return bool(self._attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+        def stat(self, follow_symlinks=True):
+            if follow_symlinks and self._attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+                if self._stat_cache is None:
+                    self._stat_cache = os.stat(self.path)
+                return self._stat_cache
+            return self._lstat_cache
+
+        def __fspath__(self):
+            return self.path
+
+    def _scandir_windows(path):
+        '''Enumerate *path* using FindFirstFileExW with FIND_FIRST_EX_LARGE_FETCH.
+
+        Yields _WinDirEntry objects (skipping "." and "..").  The large-fetch
+        flag asks the kernel to use a bigger internal buffer so that more
+        entries are returned per system call, reducing context-switch overhead
+        for directories with many files.  FindExInfoBasic omits the short
+        (8.3) filename field, saving additional work per entry.
+        '''
+        find_data = _WIN32_FIND_DATAW()
+        search_path = os.path.join(path, '*')
+        handle = _kernel32.FindFirstFileExW(
+            search_path,
+            _FindExInfoBasic,
+            ctypes.byref(find_data),
+            _FindExSearchNameMatch,
+            None,
+            _FIND_FIRST_EX_LARGE_FETCH,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            err = ctypes.get_last_error()
+            raise OSError(err, os.strerror(err), path)
+        try:
+            while True:
+                name = find_data.cFileName
+                if name not in ('.', '..'):
+                    # Snapshot the current find_data so the caller can keep the
+                    # entry alive independently of the next FindNextFileW call.
+                    snapshot = _WIN32_FIND_DATAW()
+                    ctypes.memmove(
+                        ctypes.byref(snapshot),
+                        ctypes.byref(find_data),
+                        ctypes.sizeof(_WIN32_FIND_DATAW),
+                    )
+                    yield _WinDirEntry(path, name, snapshot)
+                if not _kernel32.FindNextFileW(handle, ctypes.byref(find_data)):
+                    err = ctypes.get_last_error()
+                    if err == _ERROR_NO_MORE_FILES:
+                        break
+                    raise OSError(err, os.strerror(err), path)
+        finally:
+            _kernel32.FindClose(handle)
+
+
+def _scandir(path):
+    '''Return an iterator of directory entries for *path*.
+
+    On Windows uses FindFirstFileExW with FIND_FIRST_EX_LARGE_FETCH and
+    FindExInfoBasic for faster metadata gathering.  On all other platforms
+    delegates to os.scandir.
+    '''
+    if sys.platform == 'win32':
+        return _scandir_windows(path)
+    return os.scandir(path)
+
+
+def _walk(top, topdown=True, onerror=None, followlinks=False):
+    '''Yield (dirpath, dirnames, filenames) triples, mirroring os.walk.
+
+    Uses _scandir (and therefore FindFirstFileExW + FIND_FIRST_EX_LARGE_FETCH
+    on Windows) instead of the default os.listdir-based implementation so that
+    file-attribute metadata is collected in a single pass with fewer syscalls.
+    '''
+    try:
+        entries = list(_scandir(top))
+    except OSError as error:
+        if onerror is not None:
+            onerror(error)
+        return
+
+    dirs = []
+    nondirs = []
+    walk_dirs = []
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            dirs.append(entry.name)
+            if followlinks or not entry.is_symlink():
+                walk_dirs.append(entry.path)
+        else:
+            nondirs.append(entry.name)
+
+    if topdown:
+        yield top, dirs, nondirs
+        for sub_path in walk_dirs:
+            for item in _walk(sub_path, topdown, onerror, followlinks):
+                yield item
+    else:
+        for sub_path in walk_dirs:
+            for item in _walk(sub_path, topdown, onerror, followlinks):
+                yield item
+        yield top, dirs, nondirs
 
 '''
 The version of this script as a string. (e.g. '1.0.0')
@@ -194,7 +430,7 @@ def copy(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exclu
 
             # Traverse the tree and begin copying. Always traverse from the bottom up as this ensures we get the
             # desired behavior for file/dir inclusion patterns.
-            for root, dirs, files in os.walk(src, topdown=False, followlinks=followLinks):
+            for root, dirs, files in _walk(src, topdown=False, followlinks=followLinks):
                 relRoot = os.path.relpath(root, src)
 
                 logger.debug("Processing Directory: %s", relRoot)
@@ -396,14 +632,14 @@ def mirror(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exc
         results['filesRemovedList'] = []
         results['dirsRemovedList'] = []
     # Add the exclude fils
-    results['dirsSkippedList'] += excludeDirs
-    results['filesSkippedList'] += excludeFiles
+    results['dirsSkippedList'] += (excludeDirs or [])
+    results['filesSkippedList'] += (excludeFiles or [])
 
     # Determine the max depth of src so that we don't go beyond that level in dst (if they're different)
     maxDepth = _getTreeDepth(src)
 
     # Now traverse through the destination and remove anything not also in source
-    for root, dirs, files in os.walk(dst, topdown=False, followlinks=followLinks):
+    for root, dirs, files in _walk(dst, topdown=False, followlinks=followLinks):
         relRoot = os.path.relpath(root, dst)
 
         # Make sure we are removing files/dirs only at the desired depth
@@ -559,7 +795,7 @@ def move(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exclu
                        preserveStats=preserveStats, detailedResults=True)
 
     # Delete the source tree. Don't remove anything that was in the list of failed or skipped files/dirs
-    for root, dirs, files in os.walk(src, topdown=False):
+    for root, dirs, files in _walk(src, topdown=False):
         relRoot = os.path.relpath(root, src)
 
         deleteDir = True
@@ -820,7 +1056,7 @@ Given a path 'Level1/Level2/Level3' and a pattern 'Level1' would return 'Level1/
 def _normalizeDirPattern(pattern, path):
     bIsRegex = False
     tmpPattern = pattern
-    if (isinstance(pattern, re._pattern_type)):
+    if (isinstance(pattern, _re_pattern_type)):
         tmpPattern = pattern.pattern
         bIsRegex = True
     elif (pattern.startswith('re:')):
@@ -877,7 +1113,7 @@ Given a filepath 'Level1/Level2/MyFile.txt' and a pattern 'Level1/*.txt' will re
 def _normalizeFilePattern(pattern, filepath):
     bIsRegex = False
     tmpPattern = pattern
-    if (isinstance(pattern, re._pattern_type)):
+    if (isinstance(pattern, _re_pattern_type)):
         tmpPattern = pattern.pattern
         bIsRegex = True
     elif (pattern.startswith('re:')):
@@ -952,7 +1188,7 @@ def _checkShouldCopy(path, bIsFile, includes, excludes):
             else:
                 normPattern = _normalizeDirPattern(pattern, path)
 
-            if (isinstance(normPattern, re._pattern_type)):
+            if (isinstance(normPattern, _re_pattern_type)):
                 if (normPattern.match(rePath) != None):
                     isIncluded = True
                     break
@@ -971,7 +1207,7 @@ def _checkShouldCopy(path, bIsFile, includes, excludes):
             else:
                 normPattern = _normalizeDirPattern(pattern, path)
 
-            if (isinstance(normPattern, re._pattern_type)):
+            if (isinstance(normPattern, _re_pattern_type)):
                 if (normPattern.match(rePath) != None):
                     return False
             else:
@@ -1200,7 +1436,7 @@ Determines the maximum depth of the tree for a given path.
 
 def _getTreeDepth(path):
     maxDepth = 0
-    for root, dirs, files in os.walk(path):
+    for root, dirs, files in _walk(path):
         relRoot = os.path.relpath(root, path)
         depth = relRoot.count(os.path.sep) + 1
         if (depth > maxDepth):
