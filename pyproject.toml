@@ -3,7 +3,7 @@ requires = ["uv-build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
 
 [project]
-name = "pyrocopy"
+name = "pyrocopy314"
 version = "0.8.0"
 description = "A suite of robust file copying utilities for Python."
 license = "MIT"
