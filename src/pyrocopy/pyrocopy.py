@@ -8,7 +8,7 @@ from __future__ import annotations
 from ._display import _displayCopyResults, _displayProgress
 from ._filesystem import _copyFile, _copyStats, _getTreeDepth, _isSamePath, mkdir
 from ._operations import copy, mirror, move, sync
-from ._patterns import _Pattern, _checkShouldCopy, _compile_patterns, _normalizeDirPattern, _normalizeFilePattern
+from ._patterns import _checkShouldCopy, _compile_patterns, _normalizeDirPattern, _normalizeFilePattern, _Pattern
 from ._results import CopyResults, MirrorResults, MoveResults, _CopyState, _MirrorState
 from ._runtime import BUFFERSIZE_KIB, logger
 

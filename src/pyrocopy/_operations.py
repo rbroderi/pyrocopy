@@ -9,9 +9,9 @@ from ._results import (
     CopyResults,
     MirrorResults,
     MoveResults,
-    _MirrorState,
     _init_copy_state,
     _merge_unique,
+    _MirrorState,
     _record_file_result,
 )
 from ._runtime import logger

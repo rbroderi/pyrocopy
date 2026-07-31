@@ -5,7 +5,7 @@ import os
 import stat
 
 from ._display import _displayProgress
-from ._patterns import _Pattern, _checkShouldCopy
+from ._patterns import _checkShouldCopy, _Pattern
 from ._runtime import BUFFERSIZE_KIB, logger
 
 
