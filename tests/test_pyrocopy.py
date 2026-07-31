@@ -599,6 +599,22 @@ def test_mirror_file_includes(mirror_data: dict) -> None:
     assert not os.path.exists(os.path.join(mir_b, "subB1", "subSubB1", "fileSubB11"))
 
 
+def test_mirror_file_includes_remove_filtered_source_files_from_destination(mirror_data: dict) -> None:
+    tmp_path = mirror_data["tmp_path"]
+    path_a = mirror_data["pathA"]
+    sub_a2, sub_a21 = mirror_data["subPathA2"], mirror_data["subPathA21"]
+    mir_a, mir_b = str(tmp_path / "mirrorA"), str(tmp_path / "mirrorB")
+    pyrocopy.copy(path_a, mir_a)
+    pyrocopy.copy(path_a, mir_b)
+
+    results = pyrocopy.mirror(mir_a, mir_b, includeFiles=["*A1*"], detailedResults=True)
+    assert results.filesRemoved == 2 and results.dirsRemoved == 2
+    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a), "fileSubA2"))
+    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a), "fileSubA21"))
+    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a)))
+    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a)))
+
+
 def test_mirror_file_excludes(mirror_data: dict) -> None:
     tmp_path = mirror_data["tmp_path"]
     path_a, path_b = mirror_data["pathA"], mirror_data["pathB"]

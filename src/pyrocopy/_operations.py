@@ -175,20 +175,18 @@ def mirror(
         dirsRemovedList=[] if detailedResults else None,
     )
 
-    if excludeDirs:
-        state.dirsSkippedList.extend(excludeDirs)  # type: ignore[union-attr]
-    if excludeFiles:
-        state.filesSkippedList.extend(excludeFiles)  # type: ignore[union-attr]
-
     max_depth = _getTreeDepth(src)
 
-    skipped_dirs: set[str] = set(state.dirsSkippedList or [])
     failed_dirs: set[str] = set(state.dirsFailedList or [])
-    skipped_files: set[str] = set(state.filesSkippedList or [])
     failed_files: set[str] = set(state.filesFailedList or [])
+    include_file_patterns = _compile_patterns(includeFiles)
+    include_dir_patterns = _compile_patterns(includeDirs)
+    exclude_file_patterns = _compile_patterns(excludeFiles)
+    exclude_dir_patterns = _compile_patterns(excludeDirs)
 
     for root, dirs, files in os.walk(dst, topdown=False, followlinks=followLinks):
         rel_root = os.path.relpath(root, dst)
+        normalized_rel_root = "" if rel_root == "." else rel_root
 
         if level != 0:
             depth = 0 if rel_root == "." else rel_root.count(os.path.sep) + 1
@@ -197,15 +195,30 @@ def mirror(
             if depth >= abs(level):
                 continue
 
-        if rel_root in skipped_dirs or rel_root in failed_dirs:
+        if rel_root in failed_dirs:
             continue
 
         for file in files:
             file_path = os.path.join(root, file)
-            rel_file_path = os.path.join(rel_root, file)
-            if rel_file_path in skipped_files or rel_file_path in failed_files:
+            rel_file_path = file if not normalized_rel_root else os.path.join(normalized_rel_root, file)
+            src_file_path = os.path.join(src, rel_file_path)
+            if rel_file_path in failed_files:
                 continue
-            if not os.path.exists(os.path.join(src, rel_file_path)):
+            if os.path.exists(src_file_path) and _checkShouldCopy(
+                rel_file_path,
+                True,
+                include_file_patterns,
+                exclude_file_patterns,
+            ):
+                continue
+            if not os.path.lexists(file_path):
+                continue
+            if not os.path.exists(src_file_path) or not _checkShouldCopy(
+                rel_file_path,
+                True,
+                include_file_patterns,
+                exclude_file_patterns,
+            ):
                 try:
                     os.remove(file_path)
                     state.filesRemoved += 1
@@ -214,7 +227,14 @@ def mirror(
                 except OSError:
                     state.filesFailedList.append(rel_file_path)  # type: ignore[union-attr]
 
-        if not os.path.exists(os.path.join(src, rel_root)):
+        src_dir_path = src if not normalized_rel_root else os.path.join(src, normalized_rel_root)
+        dir_selected = rel_root == "." or _checkShouldCopy(
+            normalized_rel_root,
+            False,
+            include_dir_patterns,
+            exclude_dir_patterns,
+        )
+        if not os.path.exists(src_dir_path) or not dir_selected:
             if not os.listdir(root):
                 try:
                     os.rmdir(root)

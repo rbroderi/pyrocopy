@@ -1,3 +1,11 @@
+v0.10.0
+-------
+Features:
+Bump release version to 0.10.0
+
+Bugs:
+Fixed mirror cleanup when include-file filters exclude source files that still exist in the destination
+
 v0.8.0
 ------
 Features:
