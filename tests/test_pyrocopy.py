@@ -590,29 +590,32 @@ def test_mirror_file_includes(mirror_data: dict) -> None:
 
     results = pyrocopy.mirror(mir_a, mir_b, includeFiles=["*A1*"], detailedResults=True)
     assert results.filesCopied == 3 and results.filesSkipped == 2
-    assert results.filesRemoved == 3 and results.dirsRemoved == 2
+    assert results.filesRemoved == 0 and results.dirsRemoved == 0
     assert os.path.exists(os.path.join(mir_b, "fileA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1"))
     assert os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a1, path_a), "fileSubA1-2"))
-    assert not os.path.exists(os.path.join(mir_b, "fileB1"))
-    assert not os.path.exists(os.path.join(mir_b, "subB1", "fileSubB1"))
-    assert not os.path.exists(os.path.join(mir_b, "subB1", "subSubB1", "fileSubB11"))
+    assert os.path.exists(os.path.join(mir_b, "fileB1"))
+    assert os.path.exists(os.path.join(mir_b, "subB1", "fileSubB1"))
+    assert os.path.exists(os.path.join(mir_b, "subB1", "subSubB1", "fileSubB11"))
 
 
-def test_mirror_file_includes_remove_filtered_source_files_from_destination(mirror_data: dict) -> None:
+def test_mirror_file_includes_remove_matching_destination_only_files(mirror_data: dict) -> None:
     tmp_path = mirror_data["tmp_path"]
     path_a = mirror_data["pathA"]
-    sub_a2, sub_a21 = mirror_data["subPathA2"], mirror_data["subPathA21"]
     mir_a, mir_b = str(tmp_path / "mirrorA"), str(tmp_path / "mirrorB")
     pyrocopy.copy(path_a, mir_a)
     pyrocopy.copy(path_a, mir_b)
+    gen_random_contents(os.path.join(mir_b, "orphanA1"), MAX_FILE_SIZE)
+    os.mkdir(os.path.join(mir_b, "orphanDir"))
+    gen_random_contents(os.path.join(mir_b, "orphanDir", "nestedA1"), MAX_FILE_SIZE)
+    gen_random_contents(os.path.join(mir_b, "orphanB1"), MAX_FILE_SIZE)
 
     results = pyrocopy.mirror(mir_a, mir_b, includeFiles=["*A1*"], detailedResults=True)
-    assert results.filesRemoved == 2 and results.dirsRemoved == 2
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a), "fileSubA2"))
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a), "fileSubA21"))
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a21, path_a)))
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(sub_a2, path_a)))
+    assert results.filesRemoved == 2 and results.dirsRemoved == 1
+    assert not os.path.exists(os.path.join(mir_b, "orphanA1"))
+    assert not os.path.exists(os.path.join(mir_b, "orphanDir", "nestedA1"))
+    assert not os.path.exists(os.path.join(mir_b, "orphanDir"))
+    assert os.path.exists(os.path.join(mir_b, "orphanB1"))
 
 
 def test_mirror_file_excludes(mirror_data: dict) -> None:

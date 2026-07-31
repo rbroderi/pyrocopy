@@ -4,7 +4,7 @@ Features:
 Bump release version to 0.10.0
 
 Bugs:
-Fixed mirror cleanup when include-file filters exclude source files that still exist in the destination
+Fixed mirror cleanup for destination-only files that match include-file filters
 
 v0.8.0
 ------

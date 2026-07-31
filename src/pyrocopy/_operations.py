@@ -204,7 +204,9 @@ def mirror(
             src_file_path = os.path.join(src, rel_file_path)
             if rel_file_path in failed_files:
                 continue
-            if os.path.exists(src_file_path) and _checkShouldCopy(
+            if os.path.exists(src_file_path):
+                continue
+            if not _checkShouldCopy(
                 rel_file_path,
                 True,
                 include_file_patterns,
@@ -213,19 +215,13 @@ def mirror(
                 continue
             if not os.path.lexists(file_path):
                 continue
-            if not os.path.exists(src_file_path) or not _checkShouldCopy(
-                rel_file_path,
-                True,
-                include_file_patterns,
-                exclude_file_patterns,
-            ):
-                try:
-                    os.remove(file_path)
-                    state.filesRemoved += 1
-                    if detailedResults:
-                        state.filesRemovedList.append(rel_file_path)  # type: ignore[union-attr]
-                except OSError:
-                    state.filesFailedList.append(rel_file_path)  # type: ignore[union-attr]
+            try:
+                os.remove(file_path)
+                state.filesRemoved += 1
+                if detailedResults:
+                    state.filesRemovedList.append(rel_file_path)  # type: ignore[union-attr]
+            except OSError:
+                state.filesFailedList.append(rel_file_path)  # type: ignore[union-attr]
 
         src_dir_path = src if not normalized_rel_root else os.path.join(src, normalized_rel_root)
         dir_selected = rel_root == "." or _checkShouldCopy(
