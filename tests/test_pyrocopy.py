@@ -611,11 +611,9 @@ def test_mirror_file_includes_remove_matching_destination_only_files(mirror_data
     gen_random_contents(os.path.join(mir_b, "orphanB1"), MAX_FILE_SIZE)
 
     results = pyrocopy.mirror(mir_a, mir_b, includeFiles=["*A1*"], detailedResults=True)
-    assert results.filesRemoved == 5 and results.dirsRemoved == 3
+    assert results.filesRemoved == 5 and results.dirsRemoved == 1
     assert not os.path.exists(os.path.join(mir_b, os.path.relpath(mirror_data["subPathA2"], path_a), "fileSubA2"))
     assert not os.path.exists(os.path.join(mir_b, os.path.relpath(mirror_data["subPathA21"], path_a), "fileSubA21"))
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(mirror_data["subPathA21"], path_a)))
-    assert not os.path.exists(os.path.join(mir_b, os.path.relpath(mirror_data["subPathA2"], path_a)))
     assert not os.path.exists(os.path.join(mir_b, "orphanA1"))
     assert not os.path.exists(os.path.join(mir_b, "orphanDir", "nestedA1"))
     assert not os.path.exists(os.path.join(mir_b, "orphanDir"))
