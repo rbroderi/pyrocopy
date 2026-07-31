@@ -1,18 +1,19 @@
-import re
+import importlib.util
 from pathlib import Path
 
 from setuptools import find_packages, setup
 
 VERSION_FILE = Path(__file__).parent / "pyrocopy" / "pyrocopy.py"
-VERSION_PATTERN = re.compile(r"^__version_str__\s*=\s*['\"]([^'\"]+)['\"]", re.MULTILINE)
-version_match = VERSION_PATTERN.search(VERSION_FILE.read_text(encoding="utf-8"))
-if version_match is None:
+version_spec = importlib.util.spec_from_file_location("pyrocopy_version", VERSION_FILE)
+if version_spec is None or version_spec.loader is None:
     raise RuntimeError("Unable to determine package version.")
+version_module = importlib.util.module_from_spec(version_spec)
+version_spec.loader.exec_module(version_module)
 
 setup(
     name='pyrocopy',
 
-    version=version_match.group(1),
+    version=version_module.__version_str__,
 
     description='A suite of robust file copying utilities for Python.',
     long_description="""pyrocopy is a suite of advanced file utility functions for efficiently copying all or part of a directory tree. It can be used as a module in your own application or run as a standalone command line tool.
