@@ -132,28 +132,28 @@ def copy(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exclu
 
     # Compile the provided regex patterns
     includeFilePatterns = []
-    if (includeFiles != None):
+    if (includeFiles is not None):
         for pattern in includeFiles:
             if (pattern.startswith("re:")):
                 includeFilePatterns.append(re.compile(pattern[3:]))
             else:
                 includeFilePatterns.append(pattern)
     includeDirPatterns = []
-    if (includeDirs != None):
+    if (includeDirs is not None):
         for pattern in includeDirs:
             if (pattern.startswith("re:")):
                 includeDirPatterns.append(re.compile(pattern[3:]))
             else:
                 includeDirPatterns.append(pattern)
     excludeFilePatterns = []
-    if (excludeFiles != None):
+    if (excludeFiles is not None):
         for pattern in excludeFiles:
             if (pattern.startswith("re:")):
                 excludeFilePatterns.append(re.compile(pattern[3:]))
             else:
                 excludeFilePatterns.append(pattern)
     excludeDirPatterns = []
-    if (excludeDirs != None):
+    if (excludeDirs is not None):
         for pattern in excludeDirs:
             if (pattern.startswith("re:")):
                 excludeDirPatterns.append(re.compile(pattern[3:]))
@@ -395,9 +395,11 @@ def mirror(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exc
     if (detailedResults):
         results['filesRemovedList'] = []
         results['dirsRemovedList'] = []
-    # Add the exclude fils
-    results['dirsSkippedList'] += excludeDirs
-    results['filesSkippedList'] += excludeFiles
+    # Add the exclude patterns to the skipped lists so they are not removed
+    if excludeDirs:
+        results['dirsSkippedList'] += excludeDirs
+    if excludeFiles:
+        results['filesSkippedList'] += excludeFiles
 
     # Determine the max depth of src so that we don't go beyond that level in dst (if they're different)
     maxDepth = _getTreeDepth(src)
@@ -458,7 +460,7 @@ def mirror(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exc
                             results['filesRemoved'] += 1
                             if (detailedResults):
                                 results['filesRemovedList'].append(relFilePath)
-                        except (IOError, OSError):
+                        except OSError:
                             results['filesFailedList'].append(relFilePath)
 
             # Should the directory be deleted?
@@ -471,7 +473,7 @@ def mirror(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exc
                         results['dirsRemoved'] += 1
                         if (detailedResults):
                             results['dirsRemovedList'].append(relRoot)
-                    except (IOError, OSError):
+                    except OSError:
                         results['dirsFailed'] += 1
                         if (detailedResults):
                             results['dirsFailedList'].append(relRoot)
@@ -595,7 +597,7 @@ def move(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exclu
                 if (deleteFile):
                     try:
                         os.remove(filePath)
-                    except (IOError, OSError):
+                    except OSError:
                         copyResults['filesFailedList'].append(relFilePath)
 
             # If all files were deleted it is safe to delete the directory
@@ -606,7 +608,7 @@ def move(src, dst, includeFiles=None, includeDirs=None, excludeFiles=None, exclu
                 else:
                     try:
                         os.rmdir(root)
-                    except (IOError, OSError):
+                    except OSError:
                         copyResults['dirsFailed'].append(root)
 
     # Transpose results and return
@@ -817,15 +819,17 @@ Given a path 'Level1/Level2/Level3' and a pattern 'Level1' would return 'Level1/
 '''
 
 
-def _normalizeDirPattern(pattern, path):
+def _normalizeDirPattern(pattern: str | re.Pattern[str], path: str) -> str | re.Pattern[str]:
     bIsRegex = False
-    tmpPattern = pattern
-    if (isinstance(pattern, re._pattern_type)):
+    tmpPattern: str
+    if isinstance(pattern, re.Pattern):
         tmpPattern = pattern.pattern
         bIsRegex = True
-    elif (pattern.startswith('re:')):
+    elif pattern.startswith('re:'):
         tmpPattern = pattern[3:]
         bIsRegex = True
+    else:
+        tmpPattern = pattern
 
     numPathSep = path.count(os.path.sep)
     numPatternSep = tmpPattern.count(os.path.sep)
@@ -834,10 +838,7 @@ def _normalizeDirPattern(pattern, path):
     if (numPathSep > numPatternSep):
         while (numPathSep > numPatternSep):
             if (bIsRegex):
-                if (tmpPattern != ''):
-                    tmpPattern = tmpPattern + "/.*"
-                else:
-                    tmpPattern = '.*'
+                tmpPattern = tmpPattern + "/.*" if tmpPattern != '' else '.*'
             else:
                 tmpPattern = os.path.join(tmpPattern, "*")
             numPatternSep = numPatternSep + 1
@@ -874,15 +875,17 @@ Given a filepath 'Level1/Level2/MyFile.txt' and a pattern 'Level1/*.txt' will re
 '''
 
 
-def _normalizeFilePattern(pattern, filepath):
+def _normalizeFilePattern(pattern: str | re.Pattern[str], filepath: str) -> str | re.Pattern[str]:
     bIsRegex = False
-    tmpPattern = pattern
-    if (isinstance(pattern, re._pattern_type)):
+    tmpPattern: str
+    if isinstance(pattern, re.Pattern):
         tmpPattern = pattern.pattern
         bIsRegex = True
-    elif (pattern.startswith('re:')):
+    elif pattern.startswith('re:'):
         tmpPattern = pattern[3:]
         bIsRegex = True
+    else:
+        tmpPattern = pattern
 
     # Separate the file pattern from the dir/path pattern
     patternParts = os.path.split(tmpPattern)
@@ -897,19 +900,13 @@ def _normalizeFilePattern(pattern, filepath):
     if (numPathSep > numPatternSep):
         while (numPathSep > numPatternSep):
             if (bIsRegex):
-                if (tmpPattern != ''):
-                    tmpPattern = tmpPattern + "/.*"
-                else:
-                    tmpPattern = '.*'
+                tmpPattern = tmpPattern + "/.*" if tmpPattern != '' else '.*'
             else:
                 tmpPattern = os.path.join(tmpPattern, "*")
             numPatternSep = numPatternSep + 1
 
     # Append the file pattern back
-    if (bIsRegex):
-        tmpPattern = tmpPattern + "/" + patternParts[1]
-    else:
-        tmpPattern = os.path.join(tmpPattern, patternParts[1])
+    tmpPattern = tmpPattern + "/" + patternParts[1] if bIsRegex else os.path.join(tmpPattern, patternParts[1])
 
     if (bIsRegex):
         return re.compile(tmpPattern)
@@ -943,40 +940,30 @@ def _checkShouldCopy(path, bIsFile, includes, excludes):
         rePath = path.replace(os.path.sep, '/')
 
     # Now check the path against the include list.
-    if (includes != None and len(includes) > 0):
+    if (includes is not None and len(includes) > 0):
         isIncluded = False
         for pattern in includes:
-            normPattern = None
-            if (bIsFile):
-                normPattern = _normalizeFilePattern(pattern, path)
-            else:
-                normPattern = _normalizeDirPattern(pattern, path)
+            normPattern = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
 
-            if (isinstance(normPattern, re._pattern_type)):
-                if (normPattern.match(rePath) != None):
+            if isinstance(normPattern, re.Pattern):
+                if normPattern.match(rePath) is not None:
                     isIncluded = True
                     break
-            else:
-                if (fnmatch.fnmatch(path, normPattern)):
-                    isIncluded = True
-                    break
+            elif (fnmatch.fnmatch(path, normPattern)):
+                isIncluded = True
+                break
         return isIncluded
 
     # Now check the exclude lists
-    if (excludes != None):
+    if (excludes is not None):
         for pattern in excludes:
-            normPattern = None
-            if (bIsFile):
-                normPattern = _normalizeFilePattern(pattern, path)
-            else:
-                normPattern = _normalizeDirPattern(pattern, path)
+            normPattern = _normalizeFilePattern(pattern, path) if bIsFile else _normalizeDirPattern(pattern, path)
 
-            if (isinstance(normPattern, re._pattern_type)):
-                if (normPattern.match(rePath) != None):
+            if isinstance(normPattern, re.Pattern):
+                if normPattern.match(rePath) is not None:
                     return False
-            else:
-                if (fnmatch.fnmatch(path, normPattern)):
-                    return False
+            elif (fnmatch.fnmatch(path, normPattern)):
+                return False
 
     return True
 
@@ -1038,26 +1025,24 @@ def _copyFile(src, dst, includes=None, excludes=None, showProgress=True, forceOv
     if (os.path.islink(src)):
         try:
             os.symlink(os.readlink(src), dst)
-        except (IOError, OSError):
+        except OSError:
             return -1
     else:
         # The number of bytes per read operation
-        global BUFFERSIZE_KIB
         maxReadLength = BUFFERSIZE_KIB * 1024
         try:
-            with open(src, 'rb') as fsrc:
-                with open(dst, 'wb') as fdst:
-                    bytesTotal = os.path.getsize(src)
-                    bytesWritten = 0
-                    while 1:
-                        buf = fsrc.read(maxReadLength)
-                        if not buf:
-                            break
-                        fdst.write(buf)
+            with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+                bytesTotal = os.path.getsize(src)
+                bytesWritten = 0
+                while 1:
+                    buf = fsrc.read(maxReadLength)
+                    if not buf:
+                        break
+                    fdst.write(buf)
 
-                        bytesWritten += len(buf)
-                        _displayProgress(bytesWritten, bytesTotal)
-        except (IOError, OSError):
+                    bytesWritten += len(buf)
+                    _displayProgress(bytesWritten, bytesTotal)
+        except OSError:
             return -1
 
         # Spit out an empty line so subsequent text starts on the next line
@@ -1068,10 +1053,8 @@ def _copyFile(src, dst, includes=None, excludes=None, showProgress=True, forceOv
             _copyStats(src, dst)
 
     # Was the copy successful?
-    if (os.path.exists(dst)):
-        # If the file isn't a symlink, check the size
-        if (os.path.islink(dst) or os.path.getsize(src) == os.path.getsize(dst)):
-            return 1
+    if os.path.exists(dst) and (os.path.islink(dst) or os.path.getsize(src) == os.path.getsize(dst)):
+        return 1
 
     return -1
 
@@ -1203,6 +1186,5 @@ def _getTreeDepth(path):
     for root, dirs, files in os.walk(path):
         relRoot = os.path.relpath(root, path)
         depth = relRoot.count(os.path.sep) + 1
-        if (depth > maxDepth):
-            maxDepth = depth
+        maxDepth = max(maxDepth, depth)
     return maxDepth
