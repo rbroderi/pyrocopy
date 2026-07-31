@@ -33,6 +33,7 @@ pyrocopy = "pyrocopy:main"
 [tool.uv.build-backend]
 module-root = ""
 source-include = ["tests/**", "CHANGES.txt"]
+source-exclude = ["pyproject.toml.orig"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
