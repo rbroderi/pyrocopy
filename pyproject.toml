@@ -28,34 +28,20 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = []
+requires+python = ">=3.14"
 
 [project.readme]
 file = "README.md"
 content-type = "text/markdown"
 
-[[project.authors]]
-name = "Jean-Philippe Steinmetz"
-email = "caskater47@gmail.com"
-
-[project.urls]
-Homepage = "https://github.com/caskater4/pyrocopy"
-
 [project.scripts]
 pyrocopy = "pyrocopy:main"
-
-[tool.uv.build-backend]
-module-root = ""
-source-include = [
-    "tests/**",
-    "CHANGES.txt",
-]
-source-exclude = ["pyproject.toml.orig"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 120
 
 [tool.ruff.lint]
