@@ -1,5 +1,6 @@
+from setuptools import find_packages, setup
+
 from pyrocopy import pyrocopy
-from setuptools import setup, find_packages
 
 setup(
     name='pyrocopy',
@@ -7,7 +8,7 @@ setup(
     version=pyrocopy.__version_str__,
 
     description='A suite of robust file copying utilities for Python.',
-	long_description="""pyrocopy is a suite of advanced file utility functions for efficiently copying all or part of a directory tree. It can be used as a module in your own application or run as a standalone command line tool.
+    long_description="""pyrocopy is a suite of advanced file utility functions for efficiently copying all or part of a directory tree. It can be used as a module in your own application or run as a standalone command line tool.
 
 Main Features
 -------------
@@ -22,7 +23,7 @@ For complete documentation please visit the project page on `GitHub <https://git
     url='https://github.com/caskater4/pyrocopy',
 
     author='Jean-Philippe Steinmetz',
-	author_email='caskater47@gmail.com',
+    author_email='caskater47@gmail.com',
 
     license='MIT',
 
