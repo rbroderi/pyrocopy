@@ -720,3 +720,16 @@ def test_sync_with_one_pre_existing_file(mirror_data: dict) -> None:
     assert results.filesCopied == 7 and results.dirsCopied == 5
     # fileSubB11 plus the 5 pathA files are skipped in the B→A direction.
     assert results.filesSkipped == 6 and results.dirsSkipped == 0
+
+
+def test_sync_respects_file_excludes(mirror_data: dict) -> None:
+    tmp_path = mirror_data["tmp_path"]
+    path_a, path_b = mirror_data["pathA"], mirror_data["pathB"]
+    sync_a, sync_b = str(tmp_path / "syncA"), str(tmp_path / "syncB")
+    pyrocopy.copy(path_a, sync_a)
+    pyrocopy.copy(path_b, sync_b)
+
+    results = pyrocopy.sync(sync_a, sync_b, excludeFiles=["*fileB1"], detailedResults=True)
+    assert results.filesFailed == 0 and results.dirsFailed == 0
+    assert not os.path.exists(os.path.join(sync_a, "fileB1"))
+    assert os.path.exists(os.path.join(sync_b, "fileB1"))
