@@ -12,7 +12,7 @@ from ._patterns import _checkShouldCopy, _compile_patterns, _normalizeDirPattern
 from ._results import CopyResults, MirrorResults, MoveResults, _CopyState, _MirrorState
 from ._runtime import BUFFERSIZE_KIB, logger
 
-__version__: tuple[int, int, int] = (0, 9, 0)
+__version__: tuple[int, int, int] = (0, 10, 0)
 __version_str__: str = ".".join(str(v) for v in __version__)
 
 __all__ = [
